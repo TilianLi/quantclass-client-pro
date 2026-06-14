@@ -108,3 +108,8 @@ export const minDataAutoFuzzyAtom = atomWithStorage<boolean>(
 export const minDataTabAtom = atom<"accurate" | "fuzzy">("accurate")
 
 export const unreadNotificationCountAtom = atom<number>(0)
+
+export const mcpServerInfoAtom = atom<{
+	port: number
+	mcpServerPath: string
+} | null>(null)

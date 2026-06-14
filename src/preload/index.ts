@@ -15,6 +15,7 @@ import { dataIPC } from "./data/index.js"
 import { emitterIPC } from "./emitter/index.js"
 import { fileSysIPC } from "./file-sys/index.js"
 import { kernelLogIPC } from "./kernel-log/index.js"
+import { mcpIPC } from "./mcp/index.js"
 import { migrationIPC } from "./migration/index.js"
 import { notificationIPC } from "./notification/index.js"
 import { realTradingBackupIPC } from "./real-trading-backup/index.js"
@@ -47,6 +48,7 @@ if (process.contextIsolated) {
 			...notificationIPC,
 			...realTradingBackupIPC,
 			...startupCheckIPC,
+			...mcpIPC,
 		})
 	} catch (error) {
 		console.error(error)

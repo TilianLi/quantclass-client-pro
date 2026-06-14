@@ -39,7 +39,8 @@
 		"publish:win": "chcp 65001 && node scripts/download-python.cjs && cross-env VITE_XBX_ENV=production electron-vite build && electron-builder --win --publish always",
 		"publish:mac": "node scripts/download-python.cjs --all-archs && cross-env VITE_XBX_ENV=production electron-vite build && electron-builder --mac --publish always",
 		"publish:linux": "node scripts/download-python.cjs && cross-env VITE_XBX_ENV=production electron-vite build && electron-builder --linux --publish always",
-		"build:windev": "chcp 65001 && node scripts/download-python.cjs && cross-env VITE_XBX_ENV=development electron-vite build && electron-builder --win"
+		"build:windev": "chcp 65001 && node scripts/download-python.cjs && cross-env VITE_XBX_ENV=development electron-vite build && electron-builder --win",
+		"build:mcp": "esbuild src/mcp-server/index.ts --bundle --platform=node --target=node22 --format=esm --outfile=resources/mcp-server/index.js --banner:js=\"#!/usr/bin/env node\""
 	},
 	"dependencies": {
 		"@electron-toolkit/preload": "^3.0.2",
@@ -48,6 +49,7 @@
 		"@heroui/number-input": "^2.0.7",
 		"@hono/node-server": "^1.13.7",
 		"@hookform/resolvers": "^3.9.1",
+		"@modelcontextprotocol/sdk": "^1.29.0",
 		"@tanstack/react-virtual": "^3.11.2",
 		"@types/adm-zip": "^0.5.7",
 		"adm-zip": "^0.5.16",

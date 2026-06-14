@@ -8,6 +8,7 @@
  * See the LICENSE file and https://mariadb.com/bsl11/
  */
 
+import { McpStatusBadge } from "@/renderer/components/McpStatusBadge"
 import { MinDataExecConfirmDialog } from "@/renderer/components/MinDataExecConfirmDialog"
 import { MinDataTaskTable } from "@/renderer/components/MinDataTaskTable"
 import { SelectTabs } from "@/renderer/components/select-tabs"
@@ -27,6 +28,7 @@ import {
 	TabsList,
 	TabsTrigger,
 } from "@/renderer/components/ui/tabs"
+import { useMinDataSchedule, useToggleAutoRealTrading } from "@/renderer/hooks"
 import {
 	isMinDataUpdatingAtom,
 	minDataAutoAccurateAtom,
@@ -35,10 +37,6 @@ import {
 	minDataTabAtom,
 	realConfigEditModalAtom,
 } from "@/renderer/store"
-import {
-	useMinDataSchedule,
-	useToggleAutoRealTrading,
-} from "@/renderer/hooks"
 import { realMarketConfigSchemaAtom } from "@/renderer/store/storage"
 import { getBrokerNameByAccountId } from "@/renderer/utils/broker"
 import { useAtom, useAtomValue, useSetAtom } from "jotai"
@@ -208,12 +206,15 @@ const RealtimeData: FC = () => {
 
 	return (
 		<div className="h-full flex-1 flex-col space-y-4 md:flex pt-3">
-			<p className="font-bold text-base">
-				获取 QMT 分钟级 K 线数据，支持准确数据和模糊数据两种模式。
-				{isMinDataUpdating
-					? "自动更新中"
-					: "点击启动自动更新数据，在交易时段内自动更新数据"}
-			</p>
+			<div className="flex items-center justify-between">
+				<p className="font-bold text-base">
+					获取 QMT 分钟级 K 线数据，支持准确数据和模糊数据两种模式。
+					{isMinDataUpdating
+						? "自动更新中"
+						: "点击启动自动更新数据，在交易时段内自动更新数据"}
+				</p>
+				<McpStatusBadge />
+			</div>
 
 			<div className="rounded-lg border bg-muted/30 px-4 py-3 text-sm">
 				<div className="flex items-center justify-between gap-4">
