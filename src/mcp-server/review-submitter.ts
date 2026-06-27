@@ -18,12 +18,14 @@
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import {
+	assertInsideWorkspace,
+	assertSafePathComponent,
+} from "./strategy-files.ts"
 
 export interface CandidateReport {
 	runId: string
 	variantId: string
-	performance: Record<string, unknown>
-	thresholds: Record<string, number | undefined>
 	evaluation: {
 		passed: boolean
 		score: number
@@ -68,8 +70,12 @@ export function submitForReview(
 	workspaceRoot: string,
 	params: CandidateReport,
 ): { reportPath: string; report: string } {
+	assertSafePathComponent(params.runId, "runId")
 	const report = generateCandidateReport(params)
-	const runDir = join(workspaceRoot, params.runId)
+	const runDir = assertInsideWorkspace(
+		join(workspaceRoot, params.runId),
+		workspaceRoot,
+	)
 	if (!existsSync(runDir)) {
 		mkdirSync(runDir, { recursive: true })
 	}

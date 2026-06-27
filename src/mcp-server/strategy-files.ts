@@ -31,7 +31,7 @@ export function getWorkspaceRoot(): string {
 	return WORKSPACE_ROOT
 }
 
-function assertSafePathComponent(name: string, label: string): void {
+export function assertSafePathComponent(name: string, label: string): void {
 	if (!name || typeof name !== "string") {
 		throw new Error(`${label} 不能为空`)
 	}
@@ -40,8 +40,11 @@ function assertSafePathComponent(name: string, label: string): void {
 	}
 }
 
-function assertInsideWorkspace(targetPath: string): string {
-	const resolvedRoot = resolve(WORKSPACE_ROOT)
+export function assertInsideWorkspace(
+	targetPath: string,
+	root: string = WORKSPACE_ROOT,
+): string {
+	const resolvedRoot = resolve(root)
 	const resolvedTarget = resolve(targetPath)
 	const rel = relative(resolvedRoot, resolvedTarget)
 	if (rel.startsWith("..") || isAbsolute(rel)) {

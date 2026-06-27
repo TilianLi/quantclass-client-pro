@@ -4,7 +4,9 @@
 		"outDir": "./resources/mcp-server",
 		"rootDir": "./src/mcp-server",
 		"module": "Node16",
-		"moduleResolution": "NodeNext"
+		"moduleResolution": "NodeNext",
+		"allowImportingTsExtensions": true,
+		"noEmit": true
 	},
 	"include": ["src/mcp-server/**/*"]
 }
