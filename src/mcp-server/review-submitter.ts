@@ -1,0 +1,79 @@
+/*
+ * Copyright (C) 2024 QuantClass Ltd.
+ *
+ * This file is part of the QuantClass client.
+ *
+ * Licensed under the Business Source License 1.1 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://mariadb.com/bsl11/
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { existsSync, mkdirSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
+
+export interface CandidateReport {
+	runId: string
+	variantId: string
+	performance: Record<string, unknown>
+	thresholds: Record<string, number | undefined>
+	evaluation: {
+		passed: boolean
+		score: number
+		details: Record<
+			string,
+			{ value: number; threshold: number | undefined; passed: boolean }
+		>
+	}
+	strategyPath: string
+	summary: string
+}
+
+export function generateCandidateReport(params: CandidateReport): string {
+	const lines: string[] = [
+		"# 候选策略报告",
+		"",
+		`- **Run ID**: ${params.runId}`,
+		`- **Variant ID**: ${params.variantId}`,
+		`- **策略路径**: ${params.strategyPath}`,
+		`- **综合达标**: ${params.evaluation.passed ? "✅ 通过" : "⚠️ 未完全达标（当前最优）"}`,
+		`- **得分**: ${(params.evaluation.score * 100).toFixed(1)}%`,
+		"",
+		"## 绩效指标",
+		"",
+		"| 指标 | 实际值 | 阈值 | 是否达标 |",
+		"|------|--------|------|----------|",
+	]
+
+	for (const [key, detail] of Object.entries(params.evaluation.details)) {
+		lines.push(
+			`| ${key} | ${detail.value.toFixed(2)} | ${detail.threshold ?? "-"} | ${detail.passed ? "✅" : "❌"} |`,
+		)
+	}
+
+	lines.push("", "## 策略说明", "", params.summary, "")
+	lines.push("---", "请确认是否将该策略导入 QuantClass 并启用实盘交易。")
+
+	return lines.join("\n")
+}
+
+export function submitForReview(
+	workspaceRoot: string,
+	params: CandidateReport,
+): { reportPath: string; report: string } {
+	const report = generateCandidateReport(params)
+	const runDir = join(workspaceRoot, params.runId)
+	if (!existsSync(runDir)) {
+		mkdirSync(runDir, { recursive: true })
+	}
+	const reportPath = join(runDir, "candidate-report.md")
+	writeFileSync(reportPath, report, "utf-8")
+	return { reportPath, report }
+}
