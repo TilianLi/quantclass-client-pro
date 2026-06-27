@@ -1,0 +1,18 @@
+skill:
+  name: quantclass-strategy-dev
+  version: 1.0.0
+  description: 基于模板自动开发 A 股量化策略并回测迭代
+  author: QuantClass
+  mcp:
+    servers:
+      - quantclass
+  memory:
+    - key: thresholds
+      file: config/thresholds.yaml
+    - key: workflow
+      file: workflows/strategy-dev.yaml
+  prompts:
+    init: prompts/init.md
+    generate: prompts/generate.md
+    evaluate: prompts/evaluate.md
+    improve: prompts/improve.md
