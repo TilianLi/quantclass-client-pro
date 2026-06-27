@@ -12,7 +12,7 @@
 
 ## 方案 1：本地开发构建（推荐用于联调）
 
-适用于还没安装正式发行包、本地有 worktree 编译产物的场景。
+适用于还没安装正式发行包、本地有源码编译产物的场景（先执行 `pnpm build:mcp` 生成 bundle）。
 
 ```json
 {
@@ -20,7 +20,7 @@
     "quantclass": {
       "command": "node",
       "args": [
-        "D:\\QuantClassSpace\\quantclass-client-pro\\.worktrees\\feature-mcp-support\\dist\\win-unpacked\\resources\\mcp-server\\index.js"
+        "D:\\QuantClassSpace\\quantclass-client-pro\\resources\\mcp-server\\index.js"
       ],
       "env": {
         "QUANTCLASS_PORT": "8787"

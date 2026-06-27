@@ -3,7 +3,7 @@
     "quantclass": {
       "command": "node",
       "args": [
-        "D:\\QuantClassSpace\\quantclass-client-pro\\.worktrees\\feature-mcp-support\\dist\\win-unpacked\\resources\\mcp-server\\index.js"
+        "D:\\QuantClassSpace\\quantclass-client-pro\\resources\\mcp-server\\index.js"
       ],
       "env": {
         "QUANTCLASS_PORT": "8787"
