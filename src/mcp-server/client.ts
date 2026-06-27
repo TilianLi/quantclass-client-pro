@@ -14,6 +14,7 @@ import { join } from "node:path"
 
 const DEFAULT_PORT = 8787
 const MCP_PORT_FILE = join(homedir(), ".quantclass", "mcp-port")
+const MCP_TOKEN_FILE = join(homedir(), ".quantclass", "mcp-token")
 
 /**
  * 解析端口字符串，非法值返回 null。
@@ -49,6 +50,22 @@ export function getPort(): number {
 	return DEFAULT_PORT
 }
 
+/**
+ * 读取 MCP 鉴权 token（由主进程写入 ~/.quantclass/mcp-token）。
+ * 读取失败时返回 null，对应请求不会携带 Authorization 头，
+ * 服务端 /status 仍可访问，其他路由会返回 401。
+ */
+function getToken(): string | null {
+	try {
+		if (existsSync(MCP_TOKEN_FILE)) {
+			return readFileSync(MCP_TOKEN_FILE, "utf-8").trim() || null
+		}
+	} catch {
+		// 文件不存在 / 读取失败 —— 静默返回 null
+	}
+	return null
+}
+
 function getBaseUrl(): string {
 	return `http://127.0.0.1:${getPort()}`
 }
@@ -59,23 +76,33 @@ export interface RequestOptions {
 	method: "GET" | "POST" | "PUT" | "DELETE"
 	path: string
 	body?: unknown
+	timeoutMs?: number
 }
 
 export async function request<T = unknown>(
 	options: RequestOptions,
 ): Promise<T> {
-	const { method, path, body } = options
+	const { method, path, body, timeoutMs } = options
 	const url = `${getBaseUrl()}${path}`
 
 	const controller = new AbortController()
-	const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT)
+	const timeout = setTimeout(
+		() => controller.abort(),
+		timeoutMs ?? REQUEST_TIMEOUT,
+	)
 
 	try {
+		const token = getToken()
+		const headers: Record<string, string> = {
+			"Content-Type": "application/json",
+		}
+		if (token) {
+			headers.Authorization = `Bearer ${token}`
+		}
+
 		const response = await fetch(url, {
 			method,
-			headers: {
-				"Content-Type": "application/json",
-			},
+			headers,
 			body: body !== undefined ? JSON.stringify(body) : undefined,
 			signal: controller.signal,
 		})
@@ -95,8 +122,9 @@ export async function request<T = unknown>(
 	} catch (error) {
 		if (error instanceof Error) {
 			if (error.name === "AbortError") {
+				const actualTimeout = timeoutMs ?? REQUEST_TIMEOUT
 				throw new Error(
-					`QuantClass API 请求超时: ${method} ${path} (${REQUEST_TIMEOUT}ms)。请确认 QuantClass 客户端正在运行。`,
+					`QuantClass API 请求超时: ${method} ${path} (${actualTimeout}ms)。请确认 QuantClass 客户端正在运行。`,
 				)
 			}
 			if (
@@ -115,15 +143,19 @@ export async function request<T = unknown>(
 	}
 }
 
-export async function get<T = unknown>(path: string): Promise<T> {
-	return request<T>({ method: "GET", path })
+export async function get<T = unknown>(
+	path: string,
+	timeoutMs?: number,
+): Promise<T> {
+	return request<T>({ method: "GET", path, timeoutMs })
 }
 
 export async function post<T = unknown>(
 	path: string,
 	body?: unknown,
+	timeoutMs?: number,
 ): Promise<T> {
-	return request<T>({ method: "POST", path, body })
+	return request<T>({ method: "POST", path, body, timeoutMs })
 }
 
 export async function put<T = unknown>(

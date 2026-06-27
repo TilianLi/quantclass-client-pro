@@ -99,7 +99,7 @@ export const McpStatusBadge: FC = () => {
 							<span
 								className={`h-1.5 w-1.5 rounded-full ${available ? "bg-green-500" : "bg-gray-400"}`}
 							/>
-							{available ? "可用" : "不可用"}
+							{available ? "API 在线" : "API 离线"}
 						</span>
 					</div>
 

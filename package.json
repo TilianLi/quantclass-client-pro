@@ -40,7 +40,7 @@
 		"publish:mac": "node scripts/download-python.cjs --all-archs && pnpm build:mcp && cross-env VITE_XBX_ENV=production electron-vite build && electron-builder --mac --publish always",
 		"publish:linux": "node scripts/download-python.cjs && pnpm build:mcp && cross-env VITE_XBX_ENV=production electron-vite build && electron-builder --linux --publish always",
 		"build:windev": "chcp 65001 && node scripts/download-python.cjs && pnpm build:mcp && cross-env VITE_XBX_ENV=development electron-vite build && electron-builder --win",
-		"build:mcp": "esbuild src/mcp-server/index.ts --bundle --platform=node --target=node22 --format=esm --outfile=resources/mcp-server/index.js --banner:js=\"#!/usr/bin/env node\""
+		"build:mcp": "esbuild src/mcp-server/index.ts --bundle --platform=node --target=node22 --format=esm --outfile=resources/mcp-server/index.js --banner:js=\"#!/usr/bin/env node\" && node scripts/copy-mcp-bundle.cjs"
 	},
 	"dependencies": {
 		"@electron-toolkit/preload": "^3.0.2",

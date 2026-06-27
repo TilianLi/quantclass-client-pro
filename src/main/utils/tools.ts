@@ -8,6 +8,7 @@
  * See the LICENSE file and https://mariadb.com/bsl11/
  */
 
+import { randomBytes } from "node:crypto"
 import { execSync } from "node:child_process"
 import fs, { promises as fsPromises, readdirSync, unlinkSync } from "node:fs"
 import net from "node:net"
@@ -433,6 +434,42 @@ function writeMcpPortFile(port: number): void {
 }
 
 /**
+ * MCP 鉴权 token，启动时生成，供 /mcp/* 路由校验。
+ * 独立 MCP Server 进程通过读取 ~/.quantclass/mcp-token 获取。
+ */
+let mcpToken: string | null = null
+
+export function getMcpToken(): string | null {
+	return mcpToken
+}
+
+/**
+ * 写入 MCP 鉴权 token 文件（~/.quantclass/mcp-token），安全策略同端口文件。
+ */
+function writeMcpTokenFile(token: string): void {
+	try {
+		const mcpDir = path.join(os.homedir(), ".quantclass")
+		if (!fs.existsSync(mcpDir)) {
+			fs.mkdirSync(mcpDir, { recursive: true, mode: 0o700 })
+		}
+		const tokenFile = path.join(mcpDir, "mcp-token")
+		const tmpFile = `${tokenFile}.tmp`
+		fs.writeFileSync(tmpFile, token, { encoding: "utf-8", mode: 0o600 })
+		fs.renameSync(tmpFile, tokenFile)
+		if (typeof fs.chmodSync === "function") {
+			try {
+				fs.chmodSync(tokenFile, 0o600)
+			} catch (e) {
+				logger.warn(`[mcp] 设置 token 文件权限失败（Windows 可忽略）: ${e}`)
+			}
+		}
+		logger.info(`[mcp] token 文件已写入: ${tokenFile}`)
+	} catch (error) {
+		logger.error(`[mcp] 写入 token 文件失败: ${error}`)
+	}
+}
+
+/**
  * 在可用端口上启动服务器
  * @param initialPort - 初始尝试的端口号
  * @param server - 服务器实例
@@ -466,6 +503,10 @@ export const startServerOnAvailablePort = async (
 
 			// 写入端口文件供 MCP Server 发现
 			writeMcpPortFile(port)
+
+			// 生成并写入 MCP 鉴权 token，保护 /mcp/* 路由免受本机未授权调用
+			mcpToken = randomBytes(32).toString("hex")
+			writeMcpTokenFile(mcpToken)
 
 			return port
 		}

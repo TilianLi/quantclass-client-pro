@@ -10,6 +10,13 @@
 
 import { ipcRenderer } from "electron"
 
+let mcpStatusCallback:
+	| ((
+			event: Electron.IpcRendererEvent,
+			status: { connected: boolean; clientCount: number },
+	  ) => void)
+	| null = null
+
 export const mcpIPC = {
 	// 获取 MCP Server 信息（路径、端口）
 	getMcpServerInfo: () => ipcRenderer.invoke("get-mcp-server-info"),
@@ -22,9 +29,14 @@ export const mcpIPC = {
 			status: { connected: boolean; clientCount: number },
 		) => void,
 	) => {
+		mcpStatusCallback = callback
 		ipcRenderer.on("mcp-status-change", callback)
 	},
 	removeMcpStatusChangeListener: () => {
-		ipcRenderer.removeAllListeners("mcp-status-change")
+		// 仅移除当前注册的回调，避免 removeAllListeners 清掉其他组件的监听器
+		if (mcpStatusCallback) {
+			ipcRenderer.removeListener("mcp-status-change", mcpStatusCallback)
+			mcpStatusCallback = null
+		}
 	},
 }

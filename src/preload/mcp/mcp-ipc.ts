@@ -53,21 +53,23 @@ function readMcpPortFile(): number | null {
 }
 
 /**
- * 通过 HEAD 请求探测 MCP /mcp/status，10s 超时。
+ * 通过 GET 请求探测 MCP /mcp/status，10s 超时。
  *
  * MCP Server 是独立 Node 进程，main 侧无法直接观察其存活；
  * Hono /mcp/status 接口可用于间接判断：MCP Server 一旦启动，
  * 会持续通过 HTTP 调用该端点完成 list_tools / list_resources /
- * 业务调用。但单次 HEAD 请求只能确认 Hono 在线、不能确认 MCP
+ * 业务调用。但单次 GET 请求只能确认 Hono 在线、不能确认 MCP
  * Server 在线；这里返回"Hono 可达且 /mcp/status 路由已注册"作为
  * available 判定的保守信号，UI 文案说明这是"App 端 MCP API"可用性。
+ *
+ * 注：/mcp/status 为只读状态接口，已豁免鉴权，探测无需携带 token。
  */
 async function probeMcpAvailable(port: number): Promise<boolean> {
 	const controller = new AbortController()
 	const timer = setTimeout(() => controller.abort(), MCP_STATUS_HTTP_TIMEOUT_MS)
 	try {
 		const res = await fetch(`http://127.0.0.1:${port}/mcp/status`, {
-			method: "HEAD",
+			method: "GET",
 			signal: controller.signal,
 		})
 		return res.ok
@@ -140,7 +142,7 @@ function getMcpServerInfoHandler() {
 
 function getMcpConnectionStatusHandler() {
 	ipcMain.handle("get-mcp-connection-status", async () => {
-		// 返回真实探测结果（HTTP HEAD，10s 超时），不再只看 port 文件是否存在
+		// 返回真实探测结果（HTTP GET /mcp/status，10s 超时），不再只看 port 文件是否存在
 		const port = (await readServerPort()) ?? readMcpPortFile() ?? 8787
 		const available = await probeMcpAvailable(port)
 		return { available, port }
