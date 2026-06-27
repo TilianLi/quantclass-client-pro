@@ -14,6 +14,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { after, describe, it } from "node:test"
 import {
+	validateConfigSyntax,
 	validateConfigVariables,
 	validateStrategy,
 } from "../../src/mcp-server/strategy-validator.ts"
@@ -23,6 +24,17 @@ const TMP = mkdtempSync(join(tmpdir(), "qc-validator-"))
 describe("strategy-validator", () => {
 	after(() => {
 		rmSync(TMP, { recursive: true, force: true })
+	})
+
+	it("returns empty errors for valid Python syntax", () => {
+		const errors = validateConfigSyntax("x = 1\ny = 2")
+		assert.deepStrictEqual(errors, [])
+	})
+
+	it("returns errors for invalid Python syntax", () => {
+		const errors = validateConfigSyntax("x =\n")
+		assert.strictEqual(errors.length, 1)
+		assert.ok(errors[0]?.includes("语法错误"))
 	})
 
 	it("reports missing variables", () => {

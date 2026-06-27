@@ -9,7 +9,8 @@
  */
 
 import { execFileSync } from "node:child_process"
-import { existsSync } from "node:fs"
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 const REQUIRED_VARS = ["start_date", "end_date", "period", "strategy_name"]
@@ -22,16 +23,18 @@ export interface ValidationResult {
 
 export function validateConfigSyntax(source: string): string[] {
 	const errors: string[] = []
+	const tmpDir = mkdtempSync(join(tmpdir(), "qc-syntax-"))
+	const tmpFile = join(tmpDir, "config.py")
 	try {
+		writeFileSync(tmpFile, source, "utf-8")
 		execFileSync(
 			process.platform === "win32" ? "python" : "python3",
 			[
 				"-c",
 				"import ast; ast.parse(open(__import__('sys').argv[1], 'r', encoding='utf-8').read())",
-				"-",
+				tmpFile,
 			],
 			{
-				input: source,
 				encoding: "utf-8",
 				timeout: 5000,
 			},
@@ -40,6 +43,8 @@ export function validateConfigSyntax(source: string): string[] {
 		errors.push(
 			`语法错误: ${error instanceof Error ? error.message : String(error)}`,
 		)
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true })
 	}
 	return errors
 }
