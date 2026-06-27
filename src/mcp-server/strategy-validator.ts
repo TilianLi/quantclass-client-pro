@@ -13,7 +13,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-const REQUIRED_VARS = ["start_date", "end_date", "period", "strategy_name"]
+const REQUIRED_VARS = ["backtest_name", "strategy_list"]
 
 export interface ValidationResult {
 	valid: boolean

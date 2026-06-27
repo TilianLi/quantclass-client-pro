@@ -49,15 +49,15 @@ describe("strategy-validator", () => {
 		const path = join(TMP, "good.py")
 		writeFileSync(
 			path,
-			`start_date = "2020-01-01"\nend_date = "2024-01-01"\nperiod = "daily"\nstrategy_name = "demo"`,
+			`backtest_name = "demo"\nstrategy_list = [{"name": "s1"}]`,
 		)
 		const result = validateStrategy(path)
 		assert.strictEqual(result.valid, true)
-		assert.strictEqual(result.extracted?.strategy_name, "demo")
+		assert.strictEqual(result.extracted?.backtest_name, "demo")
 	})
 
-	it("reports missing start_date", () => {
-		const errors = validateConfigVariables({ end_date: "2024-01-01" })
-		assert.ok(errors.some((e) => e.includes("start_date")))
+	it("reports missing backtest_name", () => {
+		const errors = validateConfigVariables({ strategy_list: [] })
+		assert.ok(errors.some((e) => e.includes("backtest_name")))
 	})
 })
