@@ -108,3 +108,9 @@ resources/mcp-server/
 
 # Local planning / harness state
 .mavis/
+
+# Personal scratchpad
+IDEA.md
+
+# Extracted executable artifacts
+*.exe_extracted/
