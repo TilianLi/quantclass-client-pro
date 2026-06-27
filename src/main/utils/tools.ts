@@ -8,8 +8,8 @@
  * See the LICENSE file and https://mariadb.com/bsl11/
  */
 
-import { randomBytes } from "node:crypto"
 import { execSync } from "node:child_process"
+import { randomBytes } from "node:crypto"
 import fs, { promises as fsPromises, readdirSync, unlinkSync } from "node:fs"
 import net from "node:net"
 import os from "node:os"
