@@ -1,0 +1,54 @@
+name: quantclass-strategy-dev
+version: 1.0.0
+state_machine:
+  initial: init
+  states:
+    init:
+      action: read_template_and_thresholds
+      transitions:
+        - next: generate
+
+    generate:
+      action: llm_generate_strategy
+      input:
+        template: templates/config.py.tpl
+      output: workspace/{run_id}/v{n}/config.py
+      transitions:
+        - next: validate
+
+    validate:
+      action: validate_strategy
+      transitions:
+        - on_success: import
+        - on_failure: improve
+
+    import:
+      action: import_strategy
+      transitions:
+        - on_success: backtest
+        - on_failure: improve
+
+    backtest:
+      action: run_backtest
+      transitions:
+        - on_success: evaluate
+
+    evaluate:
+      action: evaluate_backtest
+      transitions:
+        - on_met: submit
+        - on_not_met: improve
+        - on_limit_reached: submit_best
+
+    improve:
+      action: llm_improve_strategy
+      transitions:
+        - next: generate
+
+    submit:
+      action: submit_strategy_for_review
+      final: true
+
+    submit_best:
+      action: submit_strategy_for_review
+      final: true

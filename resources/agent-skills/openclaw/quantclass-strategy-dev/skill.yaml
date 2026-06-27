@@ -1,0 +1,9 @@
+name: quantclass-strategy-dev
+version: 1.0.0
+description: 基于模板自动开发 A 股量化策略并回测迭代
+author: QuantClass
+mcpServers:
+  - quantclass
+entry:
+  prompt: prompts/init.md
+  workflow: workflows/strategy-dev.yaml

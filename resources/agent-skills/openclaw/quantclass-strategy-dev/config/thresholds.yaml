@@ -1,0 +1,10 @@
+thresholds:
+  annual_return_pct: 15.0
+  max_drawdown_pct: 20.0
+  sharpe_ratio: 1.0
+  win_rate_pct: 55.0
+  profit_loss_ratio: 1.5
+
+iteration:
+  max_variants: 20
+  max_retries_per_variant: 3
