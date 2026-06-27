@@ -11,6 +11,17 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { z } from "zod"
 import { get, post, put } from "./client.js"
+import {
+  listRuns,
+  listVariants,
+  listStrategyFiles,
+  readStrategyFile,
+  writeStrategyFile,
+  getWorkspaceRoot,
+} from "./strategy-files.js"
+import { validateStrategy } from "./strategy-validator.js"
+import { evaluateBacktest } from "./backtest-evaluator.js"
+import { submitForReview } from "./review-submitter.js"
 
 /**
  * 把 `field` (允许包含 dot-key, 例如 "real_market_config.account_id")
@@ -599,6 +610,174 @@ export function registerTools(server: McpServer): void {
 							text: `获取资金曲线失败: ${error instanceof Error ? error.message : String(error)}`,
 						},
 					],
+					isError: true,
+				}
+			}
+		},
+	)
+
+	// ============================================================
+	// 策略开发闭环：文件管理 / 校验 / 评估 / 提交
+	// ============================================================
+
+	// 策略文件管理
+	server.tool(
+		"list_strategies",
+		"列出策略工作区下的所有 run 和 variant",
+		{
+			runId: z.string().optional().describe("可选：指定 run ID"),
+		},
+		async ({ runId }) => {
+			try {
+				if (runId) {
+					const variants = listVariants(runId)
+					return {
+						content: [{ type: "text", text: JSON.stringify({ runId, variants }, null, 2) }],
+					}
+				}
+				const runs = listRuns()
+				return {
+					content: [{ type: "text", text: JSON.stringify({ runs }, null, 2) }],
+				}
+			} catch (error) {
+				return {
+					content: [{ type: "text", text: `列出策略失败: ${error instanceof Error ? error.message : String(error)}` }],
+					isError: true,
+				}
+			}
+		},
+	)
+
+	server.tool(
+		"read_strategy_file",
+		"读取指定策略文件内容",
+		{
+			runId: z.string().describe("Run ID"),
+			variantId: z.string().describe("Variant ID，例如 v1"),
+			filename: z.string().describe("文件名，例如 config.py"),
+		},
+		async ({ runId, variantId, filename }) => {
+			try {
+				const content = readStrategyFile(runId, variantId, filename)
+				return {
+					content: [{ type: "text", text: content }],
+				}
+			} catch (error) {
+				return {
+					content: [{ type: "text", text: `读取失败: ${error instanceof Error ? error.message : String(error)}` }],
+					isError: true,
+				}
+			}
+		},
+	)
+
+	server.tool(
+		"write_strategy_file",
+		"写入策略文件内容",
+		{
+			runId: z.string().describe("Run ID"),
+			variantId: z.string().describe("Variant ID，例如 v1"),
+			filename: z.string().describe("文件名，例如 config.py"),
+			content: z.string().describe("文件内容"),
+		},
+		async ({ runId, variantId, filename, content }) => {
+			try {
+				writeStrategyFile(runId, variantId, filename, content)
+				return {
+					content: [{ type: "text", text: JSON.stringify({ success: true, path: `${runId}/${variantId}/${filename}` }, null, 2) }],
+				}
+			} catch (error) {
+				return {
+					content: [{ type: "text", text: `写入失败: ${error instanceof Error ? error.message : String(error)}` }],
+					isError: true,
+				}
+			}
+		},
+	)
+
+	server.tool(
+		"validate_strategy",
+		"校验 config.py 策略配置是否合法",
+		{
+			configFilePath: z.string().describe("config.py 的绝对路径"),
+		},
+		async ({ configFilePath }) => {
+			try {
+				const result = validateStrategy(configFilePath)
+				return {
+					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+				}
+			} catch (error) {
+				return {
+					content: [{ type: "text", text: `校验失败: ${error instanceof Error ? error.message : String(error)}` }],
+					isError: true,
+				}
+			}
+		},
+	)
+
+	server.tool(
+		"evaluate_backtest",
+		"根据阈值评估多次回测结果，返回最优 variant",
+		{
+			performances: z.array(z.object({
+				variantId: z.string(),
+				annual_return_pct: z.number().optional(),
+				max_drawdown_pct: z.number().optional(),
+				sharpe_ratio: z.number().optional(),
+				win_rate_pct: z.number().optional(),
+				profit_loss_ratio: z.number().optional(),
+			})),
+			thresholds: z.object({
+				annual_return_pct: z.number().optional(),
+				max_drawdown_pct: z.number().optional(),
+				sharpe_ratio: z.number().optional(),
+				win_rate_pct: z.number().optional(),
+				profit_loss_ratio: z.number().optional(),
+			}),
+		},
+		async ({ performances, thresholds }) => {
+			try {
+				const result = evaluateBacktest(performances, thresholds)
+				return {
+					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+				}
+			} catch (error) {
+				return {
+					content: [{ type: "text", text: `评估失败: ${error instanceof Error ? error.message : String(error)}` }],
+					isError: true,
+				}
+			}
+		},
+	)
+
+	server.tool(
+		"submit_strategy_for_review",
+		"生成候选策略报告并等待人工确认",
+		{
+			runId: z.string().describe("Run ID"),
+			variantId: z.string().describe("Variant ID"),
+			evaluation: z.object({
+				passed: z.boolean(),
+				score: z.number(),
+				details: z.record(z.object({
+					value: z.number(),
+					threshold: z.number().optional(),
+					passed: z.boolean(),
+				})),
+			}),
+			strategyPath: z.string().describe("策略文件路径"),
+			summary: z.string().describe("策略说明摘要"),
+		},
+		async (params) => {
+			try {
+				const { reportPath, report } = submitForReview(getWorkspaceRoot(), params)
+				return {
+					content: [{ type: "text", text: JSON.stringify({ reportPath, report }, null, 2) }],
+				}
+			} catch (error) {
+				return {
+					content: [{ type: "text", text: `生成报告失败: ${error instanceof Error ? error.message : String(error)}` }],
 					isError: true,
 				}
 			}
