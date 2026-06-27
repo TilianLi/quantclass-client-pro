@@ -1,3 +1,13 @@
+/**
+ * quantclass-client
+ * Copyright (c) 2025 量化小讲堂
+ *
+ * Licensed under the Business Source License 1.1 (BUSL-1.1).
+ * Additional Use Grant: None
+ * Change Date: 2028-08-22 | Change License: GPL-3.0-or-later
+ * See the LICENSE file and https://mariadb.com/bsl11/
+ */
+
 import {
 	existsSync,
 	mkdirSync,
@@ -5,7 +15,7 @@ import {
 	readdirSync,
 	writeFileSync,
 } from "node:fs"
-import { join } from "node:path"
+import { isAbsolute, join, relative, resolve } from "node:path"
 
 const WORKSPACE_ROOT = process.env.QUANTCLASS_AGENT_WORKSPACE
 	? process.env.QUANTCLASS_AGENT_WORKSPACE
@@ -21,6 +31,25 @@ export function getWorkspaceRoot(): string {
 	return WORKSPACE_ROOT
 }
 
+function assertSafePathComponent(name: string, label: string): void {
+	if (!name || typeof name !== "string") {
+		throw new Error(`${label} 不能为空`)
+	}
+	if (name.includes("..") || name.includes("/") || name.includes("\\")) {
+		throw new Error(`${label} 包含非法字符: ${name}`)
+	}
+}
+
+function assertInsideWorkspace(targetPath: string): string {
+	const resolvedRoot = resolve(WORKSPACE_ROOT)
+	const resolvedTarget = resolve(targetPath)
+	const rel = relative(resolvedRoot, resolvedTarget)
+	if (rel.startsWith("..") || isAbsolute(rel)) {
+		throw new Error(`路径超出工作区: ${targetPath}`)
+	}
+	return resolvedTarget
+}
+
 export function listRuns(): string[] {
 	if (!existsSync(WORKSPACE_ROOT)) return []
 	return readdirSync(WORKSPACE_ROOT, { withFileTypes: true })
@@ -29,7 +58,8 @@ export function listRuns(): string[] {
 }
 
 export function listVariants(runId: string): string[] {
-	const runPath = join(WORKSPACE_ROOT, runId)
+	assertSafePathComponent(runId, "runId")
+	const runPath = assertInsideWorkspace(join(WORKSPACE_ROOT, runId))
 	if (!existsSync(runPath)) return []
 	return readdirSync(runPath, { withFileTypes: true })
 		.filter((d) => d.isDirectory() && d.name.startsWith("v"))
@@ -42,7 +72,12 @@ export function readStrategyFile(
 	variantId: string,
 	filename: string,
 ): string {
-	const filePath = join(WORKSPACE_ROOT, runId, variantId, filename)
+	assertSafePathComponent(runId, "runId")
+	assertSafePathComponent(variantId, "variantId")
+	assertSafePathComponent(filename, "filename")
+	const filePath = assertInsideWorkspace(
+		join(WORKSPACE_ROOT, runId, variantId, filename),
+	)
 	if (!existsSync(filePath)) {
 		throw new Error(`文件不存在: ${filePath}`)
 	}
@@ -55,15 +90,21 @@ export function writeStrategyFile(
 	filename: string,
 	content: string,
 ): void {
-	const dir = join(WORKSPACE_ROOT, runId, variantId)
+	assertSafePathComponent(runId, "runId")
+	assertSafePathComponent(variantId, "variantId")
+	assertSafePathComponent(filename, "filename")
+	const dir = assertInsideWorkspace(join(WORKSPACE_ROOT, runId, variantId))
 	if (!existsSync(dir)) {
 		mkdirSync(dir, { recursive: true })
 	}
-	writeFileSync(join(dir, filename), content, "utf-8")
+	const filePath = assertInsideWorkspace(join(dir, filename))
+	writeFileSync(filePath, content, "utf-8")
 }
 
 export function listStrategyFiles(runId: string, variantId: string): string[] {
-	const dir = join(WORKSPACE_ROOT, runId, variantId)
+	assertSafePathComponent(runId, "runId")
+	assertSafePathComponent(variantId, "variantId")
+	const dir = assertInsideWorkspace(join(WORKSPACE_ROOT, runId, variantId))
 	if (!existsSync(dir)) return []
 	return readdirSync(dir, { withFileTypes: true })
 		.filter((d) => d.isFile())

@@ -41,4 +41,13 @@ describe("strategy-files", () => {
 	it("throws on missing file", () => {
 		assert.throws(() => readStrategyFile("run-001", "v1", "missing.py"))
 	})
+
+	it("rejects path traversal", () => {
+		assert.throws(() => writeStrategyFile("..", "v1", "x.py", "x"))
+		assert.throws(() => writeStrategyFile("run-002", "..", "x.py", "x"))
+		assert.throws(() => writeStrategyFile("run-002", "v1", "../.env", "x"))
+		assert.throws(() => readStrategyFile("..", "v1", "x.py"))
+		assert.throws(() => listStrategyFiles("..", "v1"))
+		assert.throws(() => listVariants(".."))
+	})
 })
