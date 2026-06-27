@@ -14,19 +14,17 @@ import type { MiddlewareHandler } from "hono"
 export const errorHandler = (): MiddlewareHandler => {
 	return async (c, next) => {
 		try {
-			await next()
-			return c.json({
-				code: 200,
-				message: "成功",
-				data: null,
-			})
+			return await next()
 		} catch (err) {
 			logger.error(`服务器错误: ${err}`)
-			return c.json({
-				code: 500,
-				message: "服务器内部错误",
-				data: null,
-			})
+			return c.json(
+				{
+					code: 500,
+					message: "服务器内部错误",
+					data: null,
+				},
+				500,
+			)
 		}
 	}
 }

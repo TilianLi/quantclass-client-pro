@@ -103,7 +103,7 @@ export const createWindow = async (tray?: Tray): Promise<void> => {
 				mainWindow?.hide()
 
 				if (platform === "darwin") {
-					app.dock.hide()
+					app.dock?.hide()
 				}
 			} finally {
 				isClosing = false // 重置关闭标志

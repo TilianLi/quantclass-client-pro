@@ -8,6 +8,8 @@
  * See the LICENSE file and https://mariadb.com/bsl11/
  */
 
+import fs from "node:fs"
+import path from "node:path"
 import {
 	getBuyInfoList,
 	getBuyTimingInfoList,
@@ -15,6 +17,7 @@ import {
 	getSellInfoList,
 	getSellTimingInfoList,
 } from "@/main/core/dataList.js"
+import windowManager from "@/main/lib/WindowManager.js"
 import { execBin } from "@/main/lib/process.js"
 import {
 	setAutoMinData,
@@ -22,20 +25,17 @@ import {
 	setAutoUpdate,
 	systemState,
 } from "@/main/lib/scheduler.js"
-import windowManager from "@/main/lib/WindowManager.js"
+import { parsePythonConfig } from "@/main/pythonRunner.js"
 import storeApi, { store } from "@/main/store/index.js"
 import { getMcpToken } from "@/main/utils/tools.js"
-import { parsePythonConfig } from "@/main/pythonRunner.js"
 import {
 	LIBRARY_TYPE,
 	POS_MGMT_STRATEGY_CONFIG,
 	SELECT_STOCK_STRATEGY_CONFIG,
 } from "@/shared/constants.js"
-import fs from "node:fs"
-import path from "node:path"
-import type { Context } from "hono"
-import { Hono } from "hono"
 import { parse } from "csv-parse/sync"
+import type { Context, MiddlewareHandler } from "hono"
+import { Hono } from "hono"
 import type { Env } from "../types/index.js"
 
 const mcpRouter = new Hono<Env>()
@@ -47,11 +47,11 @@ const mcpRouter = new Hono<Env>()
  * - 其余路由（toggle/exec/config）均需携带有效 token
  * - token 由主进程在 Hono 启动时生成，写入 ~/.quantclass/mcp-token
  */
-const mcpAuth = async (c: Context, next: () => Promise<void>) => {
+const mcpAuth: MiddlewareHandler<Env> = async (c, next) => {
 	// 只读状态接口豁免，供应用内探测使用
 	if (c.req.path.endsWith("/status")) {
 		await next()
-		return
+		return undefined
 	}
 	const token = getMcpToken()
 	if (!token) {
@@ -62,6 +62,7 @@ const mcpAuth = async (c: Context, next: () => Promise<void>) => {
 		return c.json({ code: 401, message: "未授权：无效或缺失的 MCP token" }, 401)
 	}
 	await next()
+	return undefined
 }
 
 mcpRouter.use("*", mcpAuth)
@@ -485,7 +486,10 @@ mcpRouter.post("/strategy/import", async (c: Context) => {
 
 	// -- 检查 config.py 文件是否存在
 	if (!fs.existsSync(configFilePath)) {
-		return c.json({ code: 400, message: `config.py 文件不存在: ${configFilePath}` }, 400)
+		return c.json(
+			{ code: 400, message: `config.py 文件不存在: ${configFilePath}` },
+			400,
+		)
 	}
 
 	const libraryType = store.get(LIBRARY_TYPE, "select") as string
@@ -526,7 +530,11 @@ mcpRouter.post("/strategy/import", async (c: Context) => {
 		strategyData = parseResult.strategy_list
 	} else {
 		return c.json(
-			{ code: 400, message: "config.py 中未找到 strategies/pos_strategy/strategy_list 变量" },
+			{
+				code: 400,
+				message:
+					"config.py 中未找到 strategies/pos_strategy/strategy_list 变量",
+			},
 			400,
 		)
 	}
@@ -713,7 +721,8 @@ mcpRouter.post("/strategy/import", async (c: Context) => {
 	let localStorageUpdated = false
 	if (mainWindow && !mainWindow.isDestroyed()) {
 		try {
-			const storageKey = libraryType === "pos" ? "fusion" : "selectStockStrategy25"
+			const storageKey =
+				libraryType === "pos" ? "fusion" : "selectStockStrategy25"
 			const strategiesJson = JSON.stringify(finalStrategies)
 			// 读取现有 localStorage 值，追加新策略后写回（与前端 addFusionStrategies 一致）
 			const js = `
@@ -916,7 +925,8 @@ mcpRouter.get("/backtest/equity-curve", async (c: Context) => {
 		const data = JSON.parse(JSON.stringify(allRecords))
 
 		// 抽样降采样
-		const sampled = step > 1 ? data.filter((_: unknown, i: number) => i % step === 0) : data
+		const sampled =
+			step > 1 ? data.filter((_: unknown, i: number) => i % step === 0) : data
 
 		return c.json({
 			code: 0,

@@ -86,8 +86,15 @@
    应该看到 `MCP Server` 启动消息、无 panic。
 4. **配 AI 客户端 → 重启 AI 客户端 → 让 AI 列出 MCP tools**。
    Claude Code / MiniMax-CLI 通常用 `/mcp` 命令或类似接口列出已注册 tools。
-   期望看到 7 个 tool：`get_system_status` / `toggle_min_data_schedule` / `exec_min_data` /
-   `get_trading_config` / `update_trading_config` / `toggle_auto_trading` / `toggle_history_update`。
+   当前共注册 **20 个 tools**，按功能分组如下：
+
+   - **系统控制（7 个）**：`get_system_status` / `toggle_min_data_schedule` / `exec_min_data` /
+     `get_trading_config` / `update_trading_config` / `toggle_auto_trading` / `toggle_history_update`
+   - **实盘数据查询（5 个）**：`get_buy_signals` / `get_sell_signals` / `get_stock_timing_plans` /
+     `get_account_info` / `get_trading_info`
+   - **回测工具（6 个）**：`get_backtest_config` / `set_backtest_config` / `run_backtest` /
+     `get_backtest_result` / `get_backtest_performance` / `get_backtest_equity_curve`
+   - **策略开发（2 个）**：`get_strategy_template` / `import_strategy`
 
 ---
 
@@ -104,7 +111,7 @@
 
 ---
 
-## 7 个 Tool + 2 个 Resource 速查
+## 20 个 Tool + 2 个 Resource 速查
 
 ### Tools
 
@@ -117,6 +124,19 @@
 | `update_trading_config` | `{ field: string, value: string\|number\|boolean }` | 更新交易配置（field 是 dot-key） |
 | `toggle_auto_trading` | `{ isOn: bool }` | 启停自动交易 |
 | `toggle_history_update` | `{ isOn: bool }` | 启停历史数据更新 |
+| `get_buy_signals` | (none) | 查询实盘买入信号列表 |
+| `get_sell_signals` | (none) | 查询实盘卖出信号列表 |
+| `get_stock_timing_plans` | `{ type: 'buy'\|'sell' }` | 查询个股择时买入/卖出计划 |
+| `get_account_info` | (none) | 查询实盘账户信息 |
+| `get_trading_info` | (none) | 查询 Aqua 交易信息 |
+| `get_backtest_config` | (none) | 查询当前回测配置 |
+| `set_backtest_config` | `{ initial_cash?, start_date?, end_date?, filter_kcb?, filter_cyb?, filter_bj? }` | 设置回测配置 |
+| `run_backtest` | (none) | 执行策略回测 |
+| `get_backtest_result` | (none) | 查询回测选股结果 |
+| `get_backtest_performance` | (none) | 查询回测绩效指标 |
+| `get_backtest_equity_curve` | `{ step?: number }` | 查询回测资金曲线 |
+| `get_strategy_template` | (none) | 获取策略开发模板 |
+| `import_strategy` | `{ configFilePath: string, capWeight?: number }` | 导入策略到 QuantClass |
 
 ### Resources
 
@@ -131,4 +151,4 @@
 
 - 这套 MCP server **只支持 stdio**，并且**完全只听本地** `127.0.0.1`。
 - 不要把 `~/.quantclass/mcp-port` 暴露给非本机进程 —— 它是单端口发现文件，跨机器用会落到 fallback `8787`，但实际绑在主进程上的端口可能不一样。
-- 当前没有 AI 鉴权。如果后续要让 Claude Desktop / 远端 AI 客户端连，得加 token 中间件（不在 spec 7 个 Task 范围内）。
+- `/mcp/status` 之外的所有路由都需要 `Authorization: Bearer <token>`，token 由主进程启动时生成并写入 `~/.quantclass/mcp-token`；独立 MCP Server 进程会读取该文件并自动携带。

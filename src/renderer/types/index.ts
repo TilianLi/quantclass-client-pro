@@ -11,6 +11,17 @@
 export type { SettingsType } from "./settings.js"
 export type { RealMarketConfigType } from "./trading.js"
 
+export type LoopStatus =
+	| "init"
+	| "error"
+	| "start"
+	| "outline"
+	| "done"
+	| "fuel_start"
+	| "aqua_start"
+	| "noTradingTime"
+	| "rocket_start"
+
 // 定义一个基础策略类型
 export interface BaseStrategy {
 	name: string
