@@ -10,18 +10,18 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { z } from "zod"
+import { evaluateBacktest } from "./backtest-evaluator.js"
 import { get, post, put } from "./client.js"
+import { submitForReview } from "./review-submitter.js"
 import {
-  listRuns,
-  listVariants,
-  listStrategyFiles,
-  readStrategyFile,
-  writeStrategyFile,
-  getWorkspaceRoot,
+	getWorkspaceRoot,
+	listRuns,
+	listStrategyFiles,
+	listVariants,
+	readStrategyFile,
+	writeStrategyFile,
 } from "./strategy-files.js"
 import { validateStrategy } from "./strategy-validator.js"
-import { evaluateBacktest } from "./backtest-evaluator.js"
-import { submitForReview } from "./review-submitter.js"
 
 /**
  * 把 `field` (允许包含 dot-key, 例如 "real_market_config.account_id")
@@ -632,7 +632,12 @@ export function registerTools(server: McpServer): void {
 				if (runId) {
 					const variants = listVariants(runId)
 					return {
-						content: [{ type: "text", text: JSON.stringify({ runId, variants }, null, 2) }],
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({ runId, variants }, null, 2),
+							},
+						],
 					}
 				}
 				const runs = listRuns()
@@ -641,7 +646,12 @@ export function registerTools(server: McpServer): void {
 				}
 			} catch (error) {
 				return {
-					content: [{ type: "text", text: `列出策略失败: ${error instanceof Error ? error.message : String(error)}` }],
+					content: [
+						{
+							type: "text",
+							text: `列出策略失败: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
 					isError: true,
 				}
 			}
@@ -664,7 +674,12 @@ export function registerTools(server: McpServer): void {
 				}
 			} catch (error) {
 				return {
-					content: [{ type: "text", text: `读取失败: ${error instanceof Error ? error.message : String(error)}` }],
+					content: [
+						{
+							type: "text",
+							text: `读取失败: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
 					isError: true,
 				}
 			}
@@ -684,11 +699,25 @@ export function registerTools(server: McpServer): void {
 			try {
 				writeStrategyFile(runId, variantId, filename, content)
 				return {
-					content: [{ type: "text", text: JSON.stringify({ success: true, path: `${runId}/${variantId}/${filename}` }, null, 2) }],
+					content: [
+						{
+							type: "text",
+							text: JSON.stringify(
+								{ success: true, path: `${runId}/${variantId}/${filename}` },
+								null,
+								2,
+							),
+						},
+					],
 				}
 			} catch (error) {
 				return {
-					content: [{ type: "text", text: `写入失败: ${error instanceof Error ? error.message : String(error)}` }],
+					content: [
+						{
+							type: "text",
+							text: `写入失败: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
 					isError: true,
 				}
 			}
@@ -709,7 +738,12 @@ export function registerTools(server: McpServer): void {
 				}
 			} catch (error) {
 				return {
-					content: [{ type: "text", text: `校验失败: ${error instanceof Error ? error.message : String(error)}` }],
+					content: [
+						{
+							type: "text",
+							text: `校验失败: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
 					isError: true,
 				}
 			}
@@ -720,14 +754,16 @@ export function registerTools(server: McpServer): void {
 		"evaluate_backtest",
 		"根据阈值评估多次回测结果，返回最优 variant",
 		{
-			performances: z.array(z.object({
-				variantId: z.string(),
-				annual_return_pct: z.number().optional(),
-				max_drawdown_pct: z.number().optional(),
-				sharpe_ratio: z.number().optional(),
-				win_rate_pct: z.number().optional(),
-				profit_loss_ratio: z.number().optional(),
-			})),
+			performances: z.array(
+				z.object({
+					variantId: z.string(),
+					annual_return_pct: z.number().optional(),
+					max_drawdown_pct: z.number().optional(),
+					sharpe_ratio: z.number().optional(),
+					win_rate_pct: z.number().optional(),
+					profit_loss_ratio: z.number().optional(),
+				}),
+			),
 			thresholds: z.object({
 				annual_return_pct: z.number().optional(),
 				max_drawdown_pct: z.number().optional(),
@@ -744,7 +780,12 @@ export function registerTools(server: McpServer): void {
 				}
 			} catch (error) {
 				return {
-					content: [{ type: "text", text: `评估失败: ${error instanceof Error ? error.message : String(error)}` }],
+					content: [
+						{
+							type: "text",
+							text: `评估失败: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
 					isError: true,
 				}
 			}
@@ -760,24 +801,39 @@ export function registerTools(server: McpServer): void {
 			evaluation: z.object({
 				passed: z.boolean(),
 				score: z.number(),
-				details: z.record(z.object({
-					value: z.number(),
-					threshold: z.number().optional(),
-					passed: z.boolean(),
-				})),
+				details: z.record(
+					z.object({
+						value: z.number(),
+						threshold: z.number().optional(),
+						passed: z.boolean(),
+					}),
+				),
 			}),
 			strategyPath: z.string().describe("策略文件路径"),
 			summary: z.string().describe("策略说明摘要"),
 		},
 		async (params) => {
 			try {
-				const { reportPath, report } = submitForReview(getWorkspaceRoot(), params)
+				const { reportPath, report } = submitForReview(
+					getWorkspaceRoot(),
+					params,
+				)
 				return {
-					content: [{ type: "text", text: JSON.stringify({ reportPath, report }, null, 2) }],
+					content: [
+						{
+							type: "text",
+							text: JSON.stringify({ reportPath, report }, null, 2),
+						},
+					],
 				}
 			} catch (error) {
 				return {
-					content: [{ type: "text", text: `生成报告失败: ${error instanceof Error ? error.message : String(error)}` }],
+					content: [
+						{
+							type: "text",
+							text: `生成报告失败: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
 					isError: true,
 				}
 			}
