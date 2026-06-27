@@ -1,24 +1,26 @@
-# QuantClass 策略模板：{{strategy_type}}
-# 由 Agent 自动填充生成
+# QuantClass 选股策略配置
+# 由 Agent 基于模板生成
 
-start_date = "{{start_date}}"
-end_date = "{{end_date}}"
-period = "{{period}}"
-strategy_name = "{{strategy_name}}"
+backtest_name = "{{backtest_name}}"
 
-# 选股池过滤条件
-filter_conditions = {
-    "roe_ttm": {{roe_threshold}},
-    "market_cap_min": {{market_cap_min}},
-}
-
-# 排序/打分因子
-factors = [
-    {"name": "{{factor_1}}", "weight": {{weight_1}}, "direction": "{{direction_1}}"},
+strategy_list = [
+    {
+        "name": "{{strategy_name}}",
+        "cap_weight": {{cap_weight}},
+        "hold_period": "{{hold_period}}",
+        "select_num": {{select_num}},
+        "offset_list": {{offset_list}},
+        "rebalance_time": "{{rebalance_time}}",
+        "factor_list": [
+            ["{{factor_name}}", {{factor_ascending}}, {{factor_params}}, {{factor_weight}}],
+        ],
+        "filter_list": [
+            ["{{filter_factor}}", {{filter_params}}, "{{filter_condition}}", {{filter_post}}],
+        ],
+        "filter_list_post": [],
+        "timing": None,
+        "buy_time": "{{buy_time}}",
+        "sell_time": "{{sell_time}}",
+        "split_order_amount": {{split_order_amount}},
+    }
 ]
-
-# 仓位与调仓参数
-position_config = {
-    "max_holdings": {{max_holdings}},
-    "rebalance_period": "{{rebalance_period}}",
-}

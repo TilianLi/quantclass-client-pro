@@ -12,7 +12,7 @@ state_machine:
       action: llm_generate_strategy
       input:
         template: templates/config.py.tpl
-      output: workspace/{run_id}/v{n}/config.py
+      output: workspace/agent-strategies/{run_id}/v{n}/config.py
       transitions:
         - next: validate
 
@@ -32,6 +32,7 @@ state_machine:
       action: run_backtest
       transitions:
         - on_success: evaluate
+        - on_failure: improve
 
     evaluate:
       action: evaluate_backtest
