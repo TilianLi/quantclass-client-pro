@@ -619,6 +619,35 @@ export function registerTools(server: McpServer): void {
 	// 策略开发闭环：文件管理 / 校验 / 评估 / 提交
 	// ============================================================
 
+	server.tool(
+		"get_strategy_workspace_root",
+		"获取策略工作区的绝对路径。Agent 在调用 write_strategy_file 后，可用此路径拼接 import_strategy 所需的 configFilePath 绝对路径。",
+		{},
+		async () => {
+			try {
+				const root = getWorkspaceRoot()
+				return {
+					content: [
+						{
+							type: "text",
+							text: JSON.stringify({ workspaceRoot: root }, null, 2),
+						},
+					],
+				}
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `获取工作区根目录失败: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
+					isError: true,
+				}
+			}
+		},
+	)
+
 	// 策略文件管理
 	server.tool(
 		"list_strategies",

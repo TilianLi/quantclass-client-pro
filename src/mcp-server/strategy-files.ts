@@ -15,11 +15,19 @@ import {
 	readdirSync,
 	writeFileSync,
 } from "node:fs"
-import { isAbsolute, join, relative, resolve } from "node:path"
+import { dirname, isAbsolute, join, relative, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
+
+function getDefaultWorkspaceRoot(): string {
+	// 从当前文件位置推导应用根目录（兼容源码、开发构建、打包应用）
+	const currentFile = fileURLToPath(import.meta.url)
+	const appRoot = resolve(dirname(currentFile), "..", "..")
+	return join(appRoot, "workspace", "agent-strategies")
+}
 
 const WORKSPACE_ROOT = process.env.QUANTCLASS_AGENT_WORKSPACE
 	? process.env.QUANTCLASS_AGENT_WORKSPACE
-	: join(process.cwd(), "workspace", "agent-strategies")
+	: getDefaultWorkspaceRoot()
 
 export interface StrategyVariant {
 	runId: string
