@@ -867,4 +867,6 @@ export function registerTools(server: McpServer): void {
 			}
 		},
 	)
+
+	console.log("[mcp-server] MCP tools registered successfully")
 }

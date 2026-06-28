@@ -54,7 +54,8 @@ export function evaluateBacktest(
 				typeof value === "number" ? value : Number.NEGATIVE_INFINITY
 			const passed =
 				key === "max_drawdown_pct"
-					? threshold === undefined || numericValue <= threshold
+					? threshold === undefined ||
+						Math.abs(numericValue) <= Math.abs(threshold)
 					: threshold === undefined || numericValue >= threshold
 
 			details[key] = { value: numericValue, threshold, passed }

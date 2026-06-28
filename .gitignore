@@ -112,5 +112,8 @@ resources/mcp-server/
 # Personal scratchpad
 IDEA.md
 
+# Agent strategy development workspace
+workspace/
+
 # Extracted executable artifacts
 *.exe_extracted/

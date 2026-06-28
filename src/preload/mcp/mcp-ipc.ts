@@ -8,6 +8,7 @@
  * See the LICENSE file and https://mariadb.com/bsl11/
  */
 
+import { execFileSync } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
@@ -126,6 +127,23 @@ function getMcpServerInfoHandler() {
 	ipcMain.handle("get-mcp-server-info", async () => {
 		// 端口优先用 electron-store，未启动时回退到 port 文件，再回退到 8787
 		const port = (await readServerPort()) ?? readMcpPortFile() ?? 8787
+
+		if (!app.isPackaged) {
+			const ensureScript = join(
+				app.getAppPath(),
+				"scripts",
+				"ensure-mcp-bundle.mjs",
+			)
+			if (existsSync(ensureScript)) {
+				try {
+					execFileSync("node", [ensureScript], { stdio: "inherit" })
+				} catch (error) {
+					logger.warn(
+						`[mcp] 自动同步 bundle 失败: ${error instanceof Error ? error.message : String(error)}`,
+					)
+				}
+			}
+		}
 
 		// MCP Server 脚本路径
 		const mcpServerPath = join(
