@@ -69,6 +69,8 @@ init
 - 每轮 variant 必须独立目录，不得覆盖历史。
 - 迭代次数不能超过 `max_variants`（默认 20）。
 - 所有文件操作必须通过 `write_strategy_file` / `read_strategy_file`，不得直接写磁盘。
+- 策略配置字段只能使用 MCP 白名单字段（`initial_cash`、`start_date`、`end_date`、`filter_kcb`、`filter_cyb`、`filter_bj` 等），不要构造额外字段。
+- 候选报告生成后必须等待人工确认，Agent 不自动导入实盘/开启自动交易。
 
 ## 第 1 步：初始化
 
@@ -164,6 +166,50 @@ init
    ```
 
    或者直接在 QuantClass 客户端里启用。
+
+## 实战风险与注意事项
+
+### 1. 中文编码风险
+
+`config.py` 在 Windows 环境下可能被系统默认编码（GBK）误解析，导致中文策略名、注释或字符串出现乱码，进而使 `validate_strategy` 或 `import_strategy` 失败。
+
+**必须遵守：**
+- 生成 `config.py` 时，内容按 **UTF-8** 编码写入（`write_strategy_file` 内部已使用 UTF-8）。
+- `backtest_name`、`strategy_name`、因子名称、过滤条件中的中文字符，必须确保是合法 UTF-8 字符串，不要夹杂 BOM 或 GBK 编码字节。
+- 如需在 config.py 里写中文注释，使用 `# -*- coding: utf-8 -*-` 习惯或直接写 UTF-8 中文注释；不要写非 ASCII 字符到 Python 标识符或关键字位置。
+- 若 `validate_strategy` 返回"语法错误"且定位到中文附近，优先检查编码是否为 UTF-8，而不是逻辑错误。
+
+### 2. `submit_strategy_for_review` 的 schema 必须完整
+
+该工具对参数结构有严格要求，不要把 `evaluate_backtest` 的返回值截断或改键名。
+
+**必须传入的字段：**
+
+```json
+{
+  "runId": "{run_id}",
+  "variantId": "{best_variant_id}",
+  "evaluation": {
+    "passed": true,
+    "score": 1.0,
+    "details": {
+      "annual_return_pct": { "value": 18.0, "threshold": 15.0, "passed": true },
+      "max_drawdown_pct": { "value": 15.0, "threshold": 20.0, "passed": true },
+      "sharpe_ratio": { "value": 1.2, "threshold": 1.0, "passed": true },
+      "win_rate_pct": { "value": 60.0, "threshold": 55.0, "passed": true },
+      "profit_loss_ratio": { "value": 1.8, "threshold": 1.5, "passed": true }
+    }
+  },
+  "strategyPath": "{workspace_root}/{run_id}/{best_variant_id}/config.py",
+  "summary": "策略说明摘要（中文需 UTF-8）"
+}
+```
+
+**约束：**
+- `evaluation` 必须包含 `passed`（boolean）、`score`（number）、`details`（object）。
+- `details` 下每个指标的 value/threshold/passed 必须齐全；不要把 `evaluate_backtest` 返回的 JSON 重新包装或改字段名。
+- `strategyPath` 必须是绝对路径，指向当前最优 variant 的 `config.py`。
+- `summary` 用简洁中文说明策略逻辑和适用场景，注意 UTF-8 编码。
 
 ## 示例用户请求
 
