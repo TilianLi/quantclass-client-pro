@@ -427,7 +427,22 @@ mcpRouter.get("/backtest/result", async (c: Context) => {
  *
  * 供 AI Agent 了解如何编写策略文件和组织目录结构。
  */
-mcpRouter.get("/strategy/template", (c: Context) => {
+mcpRouter.get("/strategy/template", async (c: Context) => {
+	// 读取 real_trading/信号库 下的可用信号
+	const signalDir = await storeApi.getAllDataPath(["real_trading", "信号库"])
+	const availableSignals: string[] = []
+	try {
+		if (fs.existsSync(signalDir)) {
+			for (const file of fs.readdirSync(signalDir)) {
+				if (file.endsWith(".py") && !file.startsWith("__")) {
+					availableSignals.push(file.replace(/\.py$/, ""))
+				}
+			}
+		}
+	} catch {
+		// 忽略读取失败
+	}
+
 	const data = {
 		configPyFormat: {
 			description:
@@ -435,7 +450,8 @@ mcpRouter.get("/strategy/template", (c: Context) => {
 			requiredVariables: {
 				strategy_list:
 					"策略列表，每个策略包含 name(名称)、cap_weight(资金占比)、hold_period(持仓周期)、select_num(选股数量)、offset_list(偏移列表)、rebalance_time(换仓时间)、factor_list(因子列表)、filter_list(过滤因子列表)、timing(择时配置)、buy_time(买入时间)、sell_time(卖出时间)、split_order_amount(拆单金额6000-12000)等字段",
-				backtest_name: "策略名称，用于标识当前策略组合（如'小市值定3-2KDJ'）",
+				backtest_name:
+					"策略名称，用于标识当前策略组合（如'小市值定3-2KDJ'）。建议同一系列 variant 命名为 xxx_v1/xxx_v2，以便 import_strategy 自动隔离旧版本。",
 			},
 			optionalVariables: {
 				re_timing: "资金曲线再择时配置，可选",
@@ -443,14 +459,36 @@ mcpRouter.get("/strategy/template", (c: Context) => {
 		},
 		directoryStructure: {
 			description:
-				"config.py 所在目录下可包含以下子目录，导入时会复制到 real_trading/ 下",
+				"config.py 所在目录下可包含以下子目录，导入时会复制到 real_trading/ 下。注意：因子库/信号库/截面因子库 的子目录下必须包含 __init__.py，否则 zeus 无法以模块方式导入。",
 			dirs: {
 				策略库: "策略 .py 文件目录（复制到 real_trading/策略库/）",
-				因子库: "因子 .py 文件目录（复制到 real_trading/因子库/）",
-				信号库: "择时信号 .py 文件目录（复制到 real_trading/信号库/）",
+				因子库:
+					"因子 .py 文件目录（复制到 real_trading/因子库/）。子目录必须含 __init__.py。",
+				信号库:
+					"择时信号 .py 文件目录（复制到 real_trading/信号库/）。子目录必须含 __init__.py。",
 				外部数据: "外部数据文件（复制到 real_trading/外部数据/）",
-				截面因子库: "截面因子 .py 文件目录（复制到 real_trading/截面因子库/）",
+				截面因子库:
+					"截面因子 .py 文件目录（复制到 real_trading/截面因子库/）。子目录必须含 __init__.py。",
 			},
+		},
+		timingExamples: {
+			description:
+				"择时配置分为 strategy-level 的 timing（开仓）/ override（离场）以及个股级别的 stock_timing_list。",
+			availableSignals,
+			notes: [
+				"stock_timing_list 中的 period 目前通常使用 '1H'（小时线）。若使用 '1D'，需确保对应因子也按日线计算，否则会出现 kline 与因子行数不一致的错误。",
+				"个股择时信号依赖信号库中的 .py 文件以及对应的因子（如 N日均价、N日最高收盘价等），需在 因子库 中提供。",
+				"timing/override 字段结构参考: { name: '信号名', limit: number, factor_list: [...], params: any, signal_time?: string, recall_days?: number, fallback_position?: number }。",
+			],
+			stockTimingListExample: [
+				{
+					name: "个股择时_均线",
+					factor_list: [["N日均价", true, 20, 1]],
+					params: 0,
+					weight: 1,
+					period: "1H",
+				},
+			],
 		},
 		note: "导入时可通过 capWeight 参数设置资金占比（0-1，如 1=100%），不传则重置为 0（安全默认）。回测和实盘共享同一份 real_trading/ 目录下的策略文件。",
 	}
@@ -473,11 +511,26 @@ mcpRouter.get("/strategy/template", (c: Context) => {
  * 复制目录与原有逻辑完全一致，综合策略库额外复制"仓位管理"目录。
  * 通过 webContents.executeJavaScript 写入前端 localStorage 使界面同步更新。
  */
+/**
+ * 从 backtest_name 中提取 variant 分组前缀。
+ * 例如 "小市值低波动选股策略_v9" -> "小市值低波动选股策略_"
+ * 不匹配时返回 undefined，表示不自动隔离。
+ */
+function getStrategyGroupPrefix(name: string): string | undefined {
+	const match = name.match(/^(.*_v)\d+$/)
+	return match ? match[1] : undefined
+}
+
 mcpRouter.post("/strategy/import", async (c: Context) => {
 	const body = await c.req.json().catch(() => ({}))
-	const { configFilePath, capWeight } = body as {
+	const {
+		configFilePath,
+		capWeight,
+		isolate = true,
+	} = body as {
 		configFilePath?: string
 		capWeight?: number
+		isolate?: boolean
 	}
 
 	if (!configFilePath) {
@@ -705,14 +758,24 @@ mcpRouter.post("/strategy/import", async (c: Context) => {
 		)
 	}
 
+	// -- 隔离同组旧 variant（自动替换 _vN 系列，避免 config.json 堆积导致内核报错）
+	const groupPrefix = isolate ? getStrategyGroupPrefix(backtestName) : undefined
+	const shouldRemove = (item: unknown) => {
+		if (!groupPrefix || typeof item !== "object" || item === null) return false
+		const name = (item as Record<string, unknown>).name
+		return typeof name === "string" && name.startsWith(groupPrefix)
+	}
+
 	// -- 追加到 electron-store 中已有的策略列表（与前端 addFusionStrategies 语义一致）
-	// 前端 import-btn.tsx 使用 setFusion([...fusion, ...strategies]) 追加策略，
-	// MCP 导入也采用追加语义，避免顶掉综合策略库中已有的策略。
-	// 同时主进程直接写入 store，保证 zeus/aqua 内核读取到正确的策略配置。
+	// 若开启 isolate，先移除同组旧策略，再追加新策略。
 	const storeKey =
 		libraryType === "pos" ? "pos_mgmt.strategies" : "select_stock.strategy_list"
 	const existingStrategies = (store.get(storeKey, []) as unknown[]) ?? []
-	const mergedKernelStrategies = [...existingStrategies, ...kernelStrategies]
+	const filteredStrategies = existingStrategies.filter(
+		(item) => !shouldRemove(item),
+	)
+	const removedCount = existingStrategies.length - filteredStrategies.length
+	const mergedKernelStrategies = [...filteredStrategies, ...kernelStrategies]
 	store.set(storeKey, mergedKernelStrategies)
 	const storeUpdated = true
 
@@ -724,7 +787,7 @@ mcpRouter.post("/strategy/import", async (c: Context) => {
 			const storageKey =
 				libraryType === "pos" ? "fusion" : "selectStockStrategy25"
 			const strategiesJson = JSON.stringify(finalStrategies)
-			// 读取现有 localStorage 值，追加新策略后写回（与前端 addFusionStrategies 一致）
+			// 读取现有 localStorage 值，过滤同组旧策略后追加新策略
 			const js = `
 				(function() {
 					var key = ${JSON.stringify(storageKey)};
@@ -733,8 +796,12 @@ mcpRouter.post("/strategy/import", async (c: Context) => {
 						var raw = localStorage.getItem(key);
 						if (raw) { existing = JSON.parse(raw); if (!Array.isArray(existing)) existing = []; }
 					} catch (e) { existing = []; }
+					var groupPrefix = ${JSON.stringify(groupPrefix)};
+					var filtered = groupPrefix
+						? existing.filter(function(item) { return !(item && item.name && typeof item.name === 'string' && item.name.startsWith(groupPrefix)); })
+						: existing;
 					var newArrival = JSON.parse(${JSON.stringify(strategiesJson)});
-					var merged = existing.concat(newArrival);
+					var merged = filtered.concat(newArrival);
 					var mergedJson = JSON.stringify(merged);
 					localStorage.setItem(key, mergedJson);
 					window.dispatchEvent(new StorageEvent('storage', { key: key, newValue: mergedJson }));
@@ -763,8 +830,10 @@ mcpRouter.post("/strategy/import", async (c: Context) => {
 			reTiming: parseResult.re_timing ?? null,
 			localStorageUpdated,
 			storeUpdated,
+			isolate,
+			removedCount,
 		},
-		message: `策略导入成功: ${backtestName}（类型: ${importType}，资金占比: ${(weight * 100).toFixed(1)}%，已复制: ${copiedDirs.join(", ") || "无"}，当前共 ${mergedKernelStrategies.length} 个策略${storeUpdated ? "，配置已写入" : "，配置未写入"}${localStorageUpdated ? "，界面已同步" : "，界面未同步请刷新"}）`,
+		message: `策略导入成功: ${backtestName}（类型: ${importType}，资金占比: ${(weight * 100).toFixed(1)}%，已复制: ${copiedDirs.join(", ") || "无"}，当前共 ${mergedKernelStrategies.length} 个策略${removedCount > 0 ? `，已隔离/替换 ${removedCount} 个同组旧策略` : ""}${storeUpdated ? "，配置已写入" : "，配置未写入"}${localStorageUpdated ? "，界面已同步" : "，界面未同步请刷新"}）`,
 	})
 })
 

@@ -159,7 +159,7 @@ pnpm rebuild                  # 执行 bin/rebuild.js，按需重建 better-sqli
 
 ### 5.2 Tool 分组
 
-当前 MCP Server 共注册 **27 个 tools**，分组如下：
+当前 MCP Server 共注册 **28 个 tools**，分组如下：
 
 - **系统控制（7 个）**：
   - `get_system_status`：获取系统运行状态
@@ -185,7 +185,7 @@ pnpm rebuild                  # 执行 bin/rebuild.js，按需重建 better-sqli
   - `get_backtest_performance`：回测绩效指标
   - `get_backtest_equity_curve`：回测资金曲线
 
-- **策略开发闭环（9 个）**：
+- **策略开发闭环（10 个）**：
   - `get_strategy_template`：获取策略开发模板
   - `import_strategy`：导入策略
   - `get_strategy_workspace_root`：获取策略工作区根目录
@@ -194,6 +194,7 @@ pnpm rebuild                  # 执行 bin/rebuild.js，按需重建 better-sqli
   - `write_strategy_file`：写入策略文件
   - `validate_strategy`：校验 config.py
   - `evaluate_backtest`：评估多次回测结果
+  - `compare_backtest_variants`：按阈值对比多个 variant 绩效并返回最优
   - `submit_strategy_for_review`：生成候选策略报告等待人工确认
 
 ### 5.3 Resources

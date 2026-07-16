@@ -8,9 +8,14 @@
  * See the LICENSE file and https://mariadb.com/bsl11/
  */
 
+import { existsSync, readFileSync } from "node:fs"
+import { join } from "node:path"
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { z } from "zod"
-import { evaluateBacktest } from "./backtest-evaluator.js"
+import {
+	evaluateBacktest,
+	performanceCsvToMetrics,
+} from "./backtest-evaluator.js"
 import { get, post, put } from "./client.js"
 import { submitForReview } from "./review-submitter.js"
 import {
@@ -467,7 +472,7 @@ export function registerTools(server: McpServer): void {
 
 	server.tool(
 		"import_strategy",
-		"导入策略到 QuantClass。接收 config.py 文件路径，解析策略配置并复制策略库/因子库/信号库等到 real_trading/ 目录下。路径与 QuantClass 客户端原有导入逻辑完全一致。可选 capWeight 参数设置资金占比（0-1，如 1=100%、0.5=50%），不传则重置为 0（安全默认，需后续手动设置）。",
+		"导入策略到 QuantClass。接收 config.py 文件路径，解析策略配置并复制策略库/因子库/信号库等到 real_trading/ 目录下。路径与 QuantClass 客户端原有导入逻辑完全一致。可选 capWeight 参数设置资金占比（0-1，如 1=100%、0.5=50%），不传则重置为 0（安全默认，需后续手动设置）。默认开启 isolate，会自动替换同组（backtest_name 前缀相同，如 xxx_v1/xxx_v2）旧策略，避免 config.json 堆积。",
 		{
 			configFilePath: z
 				.string()
@@ -482,13 +487,20 @@ export function registerTools(server: McpServer): void {
 				.describe(
 					"资金占比 0-1，如 1=100%，0.5=50%。不传则重置为 0（安全默认）",
 				),
+			isolate: z
+				.boolean()
+				.optional()
+				.default(true)
+				.describe(
+					"是否自动隔离同组旧策略。true 时，若 backtest_name 形如 xxx_vN，会移除所有名称以 xxx_ 开头的旧策略。",
+				),
 		},
-		async ({ configFilePath, capWeight }) => {
+		async ({ configFilePath, capWeight, isolate }) => {
 			try {
 				// 策略导入可能涉及 Python 解析和文件复制，设置 60s 超时
 				const result = await post(
 					"/mcp/strategy/import",
-					{ configFilePath, capWeight },
+					{ configFilePath, capWeight, isolate },
 					60_000,
 				)
 				return {
@@ -812,6 +824,95 @@ export function registerTools(server: McpServer): void {
 						{
 							type: "text",
 							text: `评估失败: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
+					isError: true,
+				}
+			}
+		},
+	)
+
+	server.tool(
+		"compare_backtest_variants",
+		"读取多个 variant 的策略评价 CSV，按阈值对比并返回最优 variant。",
+		{
+			runId: z.string().describe("Run ID，例如 run-momentum-002"),
+			variantIds: z
+				.array(z.string())
+				.describe('需要对比的 variant ID 列表，例如 ["v1", "v2"]'),
+			thresholds: z.object({
+				annual_return_pct: z.number().optional(),
+				max_drawdown_pct: z.number().optional(),
+				sharpe_ratio: z.number().optional(),
+				win_rate_pct: z.number().optional(),
+				profit_loss_ratio: z.number().optional(),
+			}),
+			quantDataPath: z
+				.string()
+				.optional()
+				.describe(
+					"QuantData 根目录，默认读取环境变量 ALL_DATA_PATH 或 D:/QuantClassSpace/QuantData",
+				),
+		},
+		async ({ runId, variantIds, thresholds, quantDataPath }) => {
+			try {
+				const dataRoot =
+					quantDataPath ||
+					process.env.ALL_DATA_PATH ||
+					"D:/QuantClassSpace/QuantData"
+				const workspaceRoot = getWorkspaceRoot()
+				const performances = []
+				const errors: string[] = []
+
+				for (const variantId of variantIds) {
+					const configPath = join(workspaceRoot, runId, variantId, "config.py")
+					if (!existsSync(configPath)) {
+						errors.push(`config.py 不存在: ${variantId}`)
+						continue
+					}
+					const validation = validateStrategy(configPath)
+					const backtestName =
+						(validation.extracted?.backtest_name as string) ||
+						`${runId}_${variantId}`
+					const csvPath = join(
+						dataRoot,
+						"real_trading",
+						"data",
+						"回测结果",
+						backtestName,
+						"策略评价.csv",
+					)
+					if (!existsSync(csvPath)) {
+						errors.push(`策略评价.csv 不存在: ${variantId} (${backtestName})`)
+						continue
+					}
+					const csvText = readFileSync(csvPath, "utf-8")
+					performances.push(performanceCsvToMetrics(variantId, csvText))
+				}
+
+				const evaluation = evaluateBacktest(performances, thresholds)
+				return {
+					content: [
+						{
+							type: "text",
+							text: JSON.stringify(
+								{
+									performances,
+									evaluation,
+									errors: errors.length > 0 ? errors : undefined,
+								},
+								null,
+								2,
+							),
+						},
+					],
+				}
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `对比失败: ${error instanceof Error ? error.message : String(error)}`,
 						},
 					],
 					isError: true,

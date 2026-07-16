@@ -35,6 +35,51 @@ export interface EvaluationResult {
 	>
 }
 
+/**
+ * 解析策略评价 CSV，返回 key-value 映射。
+ * CSV 格式：第一行为表头，第一列为指标名，第二列为数值（可能带 %）。
+ */
+export function parsePerformanceCsv(csvText: string): Record<string, string> {
+	const lines = csvText.split(/\r?\n/).filter((line) => line.trim())
+	const result: Record<string, string> = {}
+	for (let i = 1; i < lines.length; i++) {
+		const parts = lines[i].split(",")
+		if (parts.length >= 2) {
+			const key = parts[0].trim()
+			const value = parts[1].trim()
+			if (key) result[key] = value
+		}
+	}
+	return result
+}
+
+/**
+ * 将百分比字符串或数字字符串转为数字。
+ */
+function parsePercentOrNumber(value: string | undefined): number | undefined {
+	if (value === undefined) return undefined
+	const cleaned = value.replace(/,/g, "").trim()
+	const match = cleaned.match(/^(-?\d+(?:\.\d+)?)\s*%?$/)
+	if (!match) return undefined
+	const num = Number.parseFloat(match[1])
+	return cleaned.endsWith("%") ? num : num
+}
+
+export function performanceCsvToMetrics(
+	variantId: string,
+	csvText: string,
+): BacktestPerformance {
+	const raw = parsePerformanceCsv(csvText)
+	return {
+		variantId,
+		annual_return_pct: parsePercentOrNumber(raw.年化收益),
+		max_drawdown_pct: parsePercentOrNumber(raw.最大回撤),
+		sharpe_ratio: parsePercentOrNumber(raw["年化收益/回撤比"]),
+		win_rate_pct: parsePercentOrNumber(raw["胜率（含0/去0）"]),
+		profit_loss_ratio: parsePercentOrNumber(raw.盈亏收益比),
+	}
+}
+
 export function evaluateBacktest(
 	performances: BacktestPerformance[],
 	thresholds: Thresholds,
