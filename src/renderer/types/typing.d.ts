@@ -22,13 +22,17 @@ type UserIPC = typeof import("@/preload/user/index.js").userIPC
 type StrategyIPC = typeof import("@/preload/strategy/index.js").strategyIPC
 type MigrationIPC = typeof import("@/preload/migration/index.js").migrationIPC
 type AuthIPC = typeof import("@/preload/auth/index.js").authIPC
+// biome-ignore format: TS 不允许 multi-line typeof import() 形式，保留单行写法以兼容 tsc
 type NotificationIPC =
 	typeof import("@/preload/notification/index.js").notificationIPC
+// biome-ignore format: TS 不允许 multi-line typeof import() 形式，保留单行写法以兼容 tsc
 type RealTradingBackupIPC =
 	typeof import("@/preload/real-trading-backup/index.js").realTradingBackupIPC
 type RepoIPC = typeof import("@/preload/repo/index.js").repoIPC
+// biome-ignore format: TS 不允许 multi-line typeof import() 形式，保留单行写法以兼容 tsc
 type StartupCheckIPC =
 	typeof import("@/preload/startup-check/index.js").startupCheckIPC
+type McpIPC = typeof import("@/preload/mcp/index.js").mcpIPC
 
 // 组合所有IPC类型
 type CustomElectronAPI = SystemIPC &
@@ -45,7 +49,8 @@ type CustomElectronAPI = SystemIPC &
 	NotificationIPC &
 	RealTradingBackupIPC &
 	RepoIPC &
-	StartupCheckIPC
+	StartupCheckIPC &
+	McpIPC
 
 interface Versions {
 	node: () => string

@@ -1,0 +1,14 @@
+{
+  "_comment": "通用 MCP 配置模板 — 把 args 里的路径替换成你机器上 quantclass.exe 同目录下的 resources/mcp-server/index.js 绝对路径, env.QUANTCLASS_PORT 改成 ~/.quantclass/mcp-port 里的实际端口 (默认 8787, 客户端启动后由主进程写入)",
+  "mcpServers": {
+    "quantclass": {
+      "command": "node",
+      "args": [
+        "REPLACE_WITH_ABSOLUTE_PATH_TO_RESOURCES_MCP_SERVER_INDEX_JS"
+      ],
+      "env": {
+        "QUANTCLASS_PORT": "8787"
+      }
+    }
+  }
+}

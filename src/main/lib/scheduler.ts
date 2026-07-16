@@ -43,6 +43,10 @@ interface SystemState {
 	job: schedule.Job | null
 	minDataJob: schedule.Job | null
 	minDataMode: "fast" | "stable"
+	// -- MCP 可调开关：准确/模糊数据获取偏好（供 /mcp/status 与 toggle 读写；
+	// -- v4.0.x 的调度执行逻辑由 period_offset.csv 交易日历决定，不以此为准）
+	minDataAccurate: boolean
+	minDataFuzzy: boolean
 	isOnline: boolean
 }
 
@@ -54,6 +58,8 @@ const systemState: SystemState = {
 	job: null,
 	minDataJob: null,
 	minDataMode: "fast",
+	minDataAccurate: true,
+	minDataFuzzy: true,
 	isOnline: true,
 }
 
@@ -392,8 +398,7 @@ async function shouldRunMinDataSchedule(): Promise<
 	if (calendar.length === 0) {
 		return {
 			run: false,
-			message:
-				"[min-data] 未读到 period_offset.csv 交易日历，跳过本轮",
+			message: "[min-data] 未读到 period_offset.csv 交易日历，跳过本轮",
 		}
 	}
 
@@ -484,9 +489,15 @@ const setupMinDataScheduler = () => {
 const setAutoMinData = (options: {
 	isOn: boolean
 	mode?: "fast" | "stable"
+	autoAccurate?: boolean
+	autoFuzzy?: boolean
 }) => {
 	systemState.isSetAutoMinData = options.isOn
 	if (options.mode !== undefined) systemState.minDataMode = options.mode
+	if (options.autoAccurate !== undefined)
+		systemState.minDataAccurate = options.autoAccurate
+	if (options.autoFuzzy !== undefined)
+		systemState.minDataFuzzy = options.autoFuzzy
 
 	logger.info(
 		`[min-data] 自动更新: ${systemState.isSetAutoMinData}, 模式: ${systemState.minDataMode}`,

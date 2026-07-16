@@ -96,3 +96,8 @@ export const minDataModeAtom = atomWithStorage<"fast" | "stable">(
 	{ getOnInit: true },
 )
 export const unreadNotificationCountAtom = atom<number>(0)
+
+export const mcpServerInfoAtom = atom<{
+	port: number
+	mcpServerPath: string
+} | null>(null)

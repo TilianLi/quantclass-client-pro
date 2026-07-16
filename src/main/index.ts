@@ -36,6 +36,7 @@ import { regCoreIPC } from "@/preload/core/core-ipc.js"
 import { regDataIPC } from "@/preload/data/data-ipc.js"
 import { regFileSysIPC } from "@/preload/file-sys/file-sys-ipc.js"
 import { regKernelLogIPC } from "@/preload/kernel-log/kernel-log-ipc.js"
+import { regMcpIPC } from "@/preload/mcp/mcp-ipc.js"
 import { regMigrationIPC } from "@/preload/migration/migration-ipc.js"
 import { regNotificationIPC } from "@/preload/notification/notification-ipc.js"
 import { regRealTradingBackupIPC } from "@/preload/real-trading-backup/real-trading-backup-ipc.js"
@@ -129,6 +130,7 @@ if (!gotTheLock) {
 		regRealTradingBackupIPC()
 		regRepoIPC()
 		regStartupCheckIPC()
+		regMcpIPC()
 
 		// -- 执行数据迁移
 		await runMigrations()

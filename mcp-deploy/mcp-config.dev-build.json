@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "quantclass": {
+      "command": "node",
+      "args": [
+        "D:\\QuantClassSpace\\quantclass-client-pro\\resources\\mcp-server\\index.js"
+      ],
+      "env": {
+        "QUANTCLASS_PORT": "8787"
+      }
+    }
+  }
+}
