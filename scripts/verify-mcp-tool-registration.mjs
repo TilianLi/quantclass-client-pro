@@ -9,11 +9,11 @@
  * See the LICENSE file and https://mariadb.com/bsl11/
  */
 
-import { Client } from "@modelcontextprotocol/sdk/client/index.js"
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { Client } from "@modelcontextprotocol/sdk/client/index.js"
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 const REQUIRED_TOOLS = [
 	"list_strategies",
@@ -22,6 +22,11 @@ const REQUIRED_TOOLS = [
 	"validate_strategy",
 	"evaluate_backtest",
 	"submit_strategy_for_review",
+	"create_research_run",
+	"record_experiment",
+	"get_experiment_trace",
+	"get_run_summary",
+	"set_strategy_weight",
 ]
 
 async function main() {
@@ -89,6 +94,28 @@ async function main() {
 			strategyPath: "run1/v1/config.py",
 			summary: "test",
 		},
+	})
+	await client.callTool({
+		name: "create_research_run",
+		arguments: {
+			runId: "run-verify",
+			brief: { goal: "verify", thresholds: { annual_return_pct: 10 } },
+		},
+	})
+	await client.callTool({
+		name: "record_experiment",
+		arguments: {
+			runId: "run-verify",
+			entry: { variantId: "v1", hypothesis: "h", verdict: "completed" },
+		},
+	})
+	await client.callTool({
+		name: "get_experiment_trace",
+		arguments: { runId: "run-verify" },
+	})
+	await client.callTool({
+		name: "get_run_summary",
+		arguments: { runId: "run-verify" },
 	})
 
 	console.log("All required tools callable.")

@@ -13,10 +13,19 @@ import { join } from "node:path"
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { z } from "zod"
 import {
+	type BacktestPerformance,
 	evaluateBacktest,
 	performanceCsvToMetrics,
 } from "./backtest-evaluator.js"
 import { get, post, put } from "./client.js"
+import {
+	createResearchRun,
+	experimentEntrySchema,
+	getExperimentTrace,
+	getRunSummary,
+	recordExperiment,
+	researchBriefSchema,
+} from "./research-run.js"
 import { submitForReview } from "./review-submitter.js"
 import {
 	getWorkspaceRoot,
@@ -521,6 +530,43 @@ export function registerTools(server: McpServer): void {
 	)
 
 	server.tool(
+		"set_strategy_weight",
+		"设置库内策略组的资金占比（0-1）。三层同步：客户端配置、界面 localStorage、real_market_25.json（zeus 回测实际读取的策略注册表）。pos 模式回测范围为全部 weight>0 策略的融合组合，回测某 variant 前应将其余策略组权重设为 0 以隔离回测范围。",
+		{
+			name: z
+				.string()
+				.describe("策略组名称（精确匹配，如 run-momentum-001_v1）"),
+			weight: z
+				.number()
+				.min(0)
+				.max(1)
+				.describe("资金占比 0-1，0=停用（跳过），1=100%"),
+		},
+		async ({ name, weight }) => {
+			try {
+				const result = await post(
+					"/mcp/strategy/weight",
+					{ name, weight },
+					60_000,
+				)
+				return {
+					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+				}
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `设置策略权重失败: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
+					isError: true,
+				}
+			}
+		},
+	)
+
+	server.tool(
 		"set_backtest_config",
 		"设置回测配置。支持字段：initial_cash(初始资金)、start_date(开始日期YYYY-MM-DD)、end_date(结束日期，null表示今天)、filter_kcb(过滤科创板0/1)、filter_cyb(过滤创业板0/1)、filter_bj(过滤北交所0/1)。非白名单字段会被拒绝。",
 		{
@@ -861,7 +907,7 @@ export function registerTools(server: McpServer): void {
 					process.env.ALL_DATA_PATH ||
 					"D:/QuantClassSpace/QuantData"
 				const workspaceRoot = getWorkspaceRoot()
-				const performances = []
+				const performances: BacktestPerformance[] = []
 				const errors: string[] = []
 
 				for (const variantId of variantIds) {
@@ -961,6 +1007,122 @@ export function registerTools(server: McpServer): void {
 						{
 							type: "text",
 							text: `生成报告失败: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
+					isError: true,
+				}
+			}
+		},
+	)
+
+	// ============================================================
+	// 研究工作流：run / trace / 总结（RDAgent 风格进化循环）
+	// ============================================================
+
+	server.tool(
+		"create_research_run",
+		"创建研究 run：在工作区写入 brief.json（研究目标、达标阈值、回测区间、进化轮数）。runId 已存在则报错，不会覆盖。",
+		{
+			runId: z.string().describe("Run ID，例如 run-momentum-001"),
+			brief: researchBriefSchema.describe("研究任务书"),
+		},
+		async ({ runId, brief }) => {
+			try {
+				const result = createResearchRun(runId, brief)
+				return {
+					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+				}
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `创建研究 run 失败: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
+					isError: true,
+				}
+			}
+		},
+	)
+
+	server.tool(
+		"record_experiment",
+		"记录一次实验到 run 的 trace.jsonl（假设、变更、绩效、评估、结论、教训）。ts 缺省时自动填当前时间。",
+		{
+			runId: z.string().describe("Run ID"),
+			entry: experimentEntrySchema.describe("实验记录"),
+		},
+		async ({ runId, entry }) => {
+			try {
+				const result = recordExperiment(runId, entry)
+				return {
+					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+				}
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `记录实验失败: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
+					isError: true,
+				}
+			}
+		},
+	)
+
+	server.tool(
+		"get_experiment_trace",
+		"读取 run 的实验 trace（trace.jsonl）。tail=N 时只返回最近 N 条以控制上下文体积。",
+		{
+			runId: z.string().describe("Run ID"),
+			tail: z
+				.number()
+				.int()
+				.positive()
+				.optional()
+				.describe("只返回最近 N 条记录"),
+		},
+		async ({ runId, tail }) => {
+			try {
+				const result = getExperimentTrace(runId, tail)
+				return {
+					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+				}
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `读取实验 trace 失败: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
+					isError: true,
+				}
+			}
+		},
+	)
+
+	server.tool(
+		"get_run_summary",
+		"汇总 run 的实验情况：实验总数、各 verdict 计数、当前 SOTA、距阈值差距、各指标趋势。",
+		{
+			runId: z.string().describe("Run ID"),
+		},
+		async ({ runId }) => {
+			try {
+				const result = getRunSummary(runId)
+				return {
+					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+				}
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `汇总 run 失败: ${error instanceof Error ? error.message : String(error)}`,
 						},
 					],
 					isError: true,

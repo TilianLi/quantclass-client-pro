@@ -31,7 +31,7 @@ export interface CandidateReport {
 		score: number
 		details: Record<
 			string,
-			{ value: number; threshold: number | undefined; passed: boolean }
+			{ value: number; threshold?: number | undefined; passed: boolean }
 		>
 	}
 	strategyPath: string

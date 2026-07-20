@@ -43,6 +43,7 @@ describe("mcp tools integration", () => {
 		assert.ok(names.includes("validate_strategy"))
 		assert.ok(names.includes("evaluate_backtest"))
 		assert.ok(names.includes("submit_strategy_for_review"))
+		assert.ok(names.includes("set_strategy_weight"))
 	})
 
 	it("writes and reads strategy file via MCP", async () => {
@@ -113,5 +114,68 @@ describe("mcp tools integration", () => {
 		const text = res.content.find((c) => c.type === "text")?.text ?? ""
 		const parsed = JSON.parse(text)
 		assert.ok(parsed.reportPath.endsWith("candidate-report.md"))
+	})
+
+	it("exposes research workflow tools", async () => {
+		const tools = await client.listTools()
+		const names = tools.tools.map((t) => t.name)
+		assert.ok(names.includes("create_research_run"))
+		assert.ok(names.includes("record_experiment"))
+		assert.ok(names.includes("get_experiment_trace"))
+		assert.ok(names.includes("get_run_summary"))
+	})
+
+	it("runs research workflow via MCP", async () => {
+		const createRes = await client.callTool({
+			name: "create_research_run",
+			arguments: {
+				runId: "run-rd",
+				brief: {
+					goal: "测试研究目标",
+					thresholds: { annual_return_pct: 15, max_drawdown_pct: 25 },
+					evolving_n: 3,
+				},
+			},
+		})
+		const createText =
+			createRes.content.find((c) => c.type === "text")?.text ?? ""
+		assert.ok(JSON.parse(createText).briefPath.endsWith("brief.json"))
+
+		await client.callTool({
+			name: "record_experiment",
+			arguments: {
+				runId: "run-rd",
+				entry: {
+					variantId: "v1",
+					hypothesis: "动量+低换手提升年化",
+					metrics: { annual_return_pct: 12, max_drawdown_pct: -28 },
+					evaluation: { passed: false, score: 0 },
+					verdict: "completed",
+					lesson: "拉长动量窗口",
+				},
+			},
+		})
+
+		const traceRes = await client.callTool({
+			name: "get_experiment_trace",
+			arguments: { runId: "run-rd" },
+		})
+		const trace = JSON.parse(
+			traceRes.content.find((c) => c.type === "text")?.text ?? "{}",
+		)
+		assert.strictEqual(trace.total, 1)
+		assert.strictEqual(trace.entries[0].variantId, "v1")
+		assert.ok(trace.entries[0].ts)
+
+		const summaryRes = await client.callTool({
+			name: "get_run_summary",
+			arguments: { runId: "run-rd" },
+		})
+		const summary = JSON.parse(
+			summaryRes.content.find((c) => c.type === "text")?.text ?? "{}",
+		)
+		assert.strictEqual(summary.totalExperiments, 1)
+		assert.strictEqual(summary.sota.variantId, "v1")
+		assert.strictEqual(summary.thresholdGaps.annual_return_pct.passed, false)
 	})
 })
