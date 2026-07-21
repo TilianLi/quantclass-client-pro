@@ -854,7 +854,11 @@ mcpRouter.post("/strategy/import", async (c: Context) => {
 			capWeight: weight,
 			copiedDirs,
 			importedStrategies: finalStrategies,
-			allStrategies: mergedKernelStrategies,
+			// 库内清单只返回名称与权重（全量策略定义体积可达数十 KB，
+			// 会挤占 AI 客户端上下文；权重隔离场景只需要这两个字段）
+			libraryStrategies: (
+				mergedKernelStrategies as Array<Record<string, unknown>>
+			).map((g) => ({ name: g?.name, cap_weight: g?.cap_weight })),
 			strategyCount: mergedKernelStrategies.length,
 			reTiming: parseResult.re_timing ?? null,
 			localStorageUpdated,
@@ -1034,11 +1038,32 @@ mcpRouter.put("/backtest/config", async (c: Context) => {
 	})
 })
 
+/** 绩效中文指标 → 工作流标准字段（evaluate_backtest / record_experiment 入参键） */
+const PERFORMANCE_METRIC_MAP: Record<string, string> = {
+	年化收益: "annual_return_pct",
+	最大回撤: "max_drawdown_pct",
+	"年化收益/回撤比": "sharpe_ratio",
+	"胜率（含0/去0）": "win_rate_pct",
+	盈亏收益比: "profit_loss_ratio",
+}
+
+/**
+ * 从绩效字符串中提取首个数值。
+ * 兼容 "14.97%"、"57.95% / 57.95%"（双值取首个）、"1,234.5"（千分位）形态。
+ */
+function parseMetricNumber(value: string | undefined): number | undefined {
+	if (!value) return undefined
+	const match = value.replace(/,/g, "").match(/-?\d+(?:\.\d+)?/)
+	return match ? Number.parseFloat(match[0]) : undefined
+}
+
 /**
  * GET /mcp/backtest/performance - 查询回测绩效指标
  *
  * 读取 real_trading/data/回测结果/{backtest_name}/策略评价.csv，
  * 返回年化收益、最大回撤、胜率等 18 项绩效指标。
+ * metrics 为原始字符串；parsed 为 5 项工作流标准指标的数值形式，
+ * 可直接用于 evaluate_backtest / record_experiment 入参。
  */
 mcpRouter.get("/backtest/performance", async (c: Context) => {
 	try {
@@ -1082,9 +1107,18 @@ mcpRouter.get("/backtest/performance", async (c: Context) => {
 			}
 		}
 
+		// 5 项工作流标准指标的数值形式，免除 AI 客户端手工解析字符串
+		const parsed: Record<string, number> = {}
+		for (const [cnKey, enKey] of Object.entries(PERFORMANCE_METRIC_MAP)) {
+			const num = parseMetricNumber(data[cnKey])
+			if (num !== undefined) {
+				parsed[enKey] = num
+			}
+		}
+
 		return c.json({
 			code: 0,
-			data: { backtestName, metrics: data },
+			data: { backtestName, metrics: data, parsed },
 			message: `成功读取策略评价: ${backtestName}`,
 		})
 	} catch (error) {

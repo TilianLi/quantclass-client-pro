@@ -73,24 +73,14 @@
    - **不传 `capWeight`**（默认重置为 0，安全）；`isolate` 用默认值 true
 2. **权重隔离（pos 模式必须）**：pos 模式的回测范围是「全部 weight>0 策略的融合组合」，不是刚导入的 variant。必须用 `set_strategy_weight` 隔离：
    - 启用当前 variant：`set_strategy_weight(name="{runId}_{variantId}", weight=1)`
-   - 将库内其他策略组逐个设为 0（组名可从 `import_strategy` 响应的 `allStrategies` 获取；回测结束后按需恢复）
+   - 将库内其他策略组逐个设为 0（组名与当前权重见 `import_strategy` 响应的 `libraryStrategies`，仅名称与权重两字段；回测结束后按需恢复）
    - 该工具三层同步（config.json、localStorage、real_market_25.json），zeus 下次启动即生效，无需重启客户端
 3. 调 `run_backtest`（空参数），阻塞等待完成。该工具会校验本次回测产物（策略评价.csv 缺失或非本次生成 → 返回失败并提示内核日志位置）。
 4. 回测失败（`code` 非 0 或错误文本）：跳到 4.5 记 `failed`（附错误摘要）。**连续 2 次回测失败则终止整个 run**：先 `get_system_status` 检查数据/内核状态，把诊断写入总结，按第 6 节收尾（不提交审阅）。
 
 ### 4.4 Evaluator：解析绩效与评估
 
-1. 调 `get_backtest_performance`（若返回「策略评价文件不存在」错误，按回测失败处理，见第 7 节）。成功时取 `data.metrics`（键值均为字符串，可能带 `%` 与千分位逗号）。映射 5 个指标（去掉 `%` 与逗号后转 number）：
-
-| metrics 键（中文） | 映射字段 |
-|---|---|
-| `年化收益` | `annual_return_pct` |
-| `最大回撤` | `max_drawdown_pct`（正负号不限，评估按绝对值比较） |
-| `年化收益/回撤比` | `sharpe_ratio` |
-| `胜率（含0/去0）` | `win_rate_pct` |
-| `盈亏收益比` | `profit_loss_ratio` |
-
-   缺失的键就不要传（不要编造）。
+1. 调 `get_backtest_performance`（若返回「策略评价文件不存在」错误，按回测失败处理，见第 7 节）。成功时**直接取 `data.parsed`**——它是 5 项工作流标准指标的数值形式（`annual_return_pct`、`max_drawdown_pct`、`sharpe_ratio`、`win_rate_pct`、`profit_loss_ratio`），可直接作为 `evaluate_backtest` 的 metrics 与 `record_experiment` 的 metrics 使用，**不要手工解析字符串**。原始中文字符串仍在 `data.metrics` 中（`累积净值` 等 18 项），仅供撰写 lesson 时参考。`parsed` 的键缺失（如某项无法解析）时不要编造。
 2. 调 `evaluate_backtest`：`performances: [{ variantId, ...上一步的指标 }]`，`thresholds: brief.thresholds`。返回 `{ passed, bestVariantId, score, details }`——`score` 是达标项比例（0-1），`passed` 为全部达标。
 3. 判定 SOTA：与 4.1 获取的 `get_run_summary(runId).sota` 比较——先比 `score`，同分比 `annual_return_pct`。本轮更优则本轮为新 SOTA（`verdict = "sota"`），否则 `verdict = "completed"`。
 
@@ -163,8 +153,8 @@ import_strategy(configFilePath=.../runId/v2/config.py)     # 不传 capWeight
 set_strategy_weight(name="{runId}_v2", weight=1)           # 启用当前 variant
 set_strategy_weight(name="<其他策略组>", weight=0)         # 逐个停用，隔离回测范围
 run_backtest()                                # 阻塞等待（带产物校验）
-get_backtest_performance()                    # data.metrics 映射 5 指标
-evaluate_backtest(performances=[{variantId:"v2", ...}], thresholds=brief.thresholds)
+get_backtest_performance()                    # 取 data.parsed（5 项数值指标）
+evaluate_backtest(performances=[{variantId:"v2", ...data.parsed}], thresholds=brief.thresholds)
 record_experiment(runId, {variantId:"v2", hypothesis, changes, files:["config.py"],
-                          metrics, evaluation:{passed, score}, verdict, lesson})
+                          metrics: data.parsed, evaluation:{passed, score}, verdict, lesson})
 ```
