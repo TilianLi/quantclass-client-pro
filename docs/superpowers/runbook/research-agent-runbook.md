@@ -23,7 +23,7 @@
 |------|------|------|
 | Researcher | 读 brief + trace，提出一个可证伪假设 | `get_experiment_trace`、`get_run_summary`、`get_strategy_template` |
 | Developer | 把假设实现为策略文件并校验通过 | `get_strategy_workspace_root`、`write_strategy_file`、`read_strategy_file`、`list_strategies`、`validate_strategy` |
-| Runner | 导入策略、执行回测 | `import_strategy`、`set_backtest_config`、`run_backtest` |
+| Runner | 导入策略、权重隔离、执行回测 | `import_strategy`、`set_strategy_weight`、`list_library_strategies`、`set_backtest_config`、`run_backtest`（长回测可换 `run_backtest_async` + `get_backtest_task`） |
 | Evaluator | 解析绩效、按阈值评估、判定 SOTA | `get_backtest_performance`、`evaluate_backtest`、`get_run_summary`、`compare_backtest_variants` |
 | Summarizer | 写 trace、产出 lesson、提交审阅 | `record_experiment`、`submit_strategy_for_review` |
 
@@ -71,10 +71,11 @@
 1. 调 `import_strategy`：
    - `configFilePath` = `<工作区绝对路径>/{runId}/{variantId}/config.py`
    - **不传 `capWeight`**（默认重置为 0，安全）；`isolate` 用默认值 true
-2. **权重隔离（pos 模式必须）**：pos 模式的回测范围是「全部 weight>0 策略的融合组合」，不是刚导入的 variant。必须用 `set_strategy_weight` 隔离：
+2. **权重隔离（pos 模式必须）**：pos 模式的回测范围是「全部 weight>0 策略的融合组合」，不是刚导入的 variant。必须隔离：
    - 启用当前 variant：`set_strategy_weight(name="{runId}_{variantId}", weight=1)`
-   - 将库内其他策略组逐个设为 0（组名与当前权重见 `import_strategy` 响应的 `libraryStrategies`，仅名称与权重两字段；回测结束后按需恢复）
-   - 该工具三层同步（config.json、localStorage、real_market_25.json），zeus 下次启动即生效，无需重启客户端
+   - 一键停用其余组：`set_strategy_weight(others_except=["{runId}_{variantId}"], weight=0)`
+   - 需要查看库内状态时调 `list_library_strategies`（仅名称与权重）
+   - 三层同步（config.json、localStorage、real_market_25.json），zeus 下次启动即生效，无需重启客户端
 3. 调 `run_backtest`（空参数），阻塞等待完成。该工具会校验本次回测产物（策略评价.csv 缺失或非本次生成 → 返回失败并提示内核日志位置）。
 4. 回测失败（`code` 非 0 或错误文本）：跳到 4.5 记 `failed`（附错误摘要）。**连续 2 次回测失败则终止整个 run**：先 `get_system_status` 检查数据/内核状态，把诊断写入总结，按第 6 节收尾（不提交审阅）。
 
@@ -86,7 +87,7 @@
 
 ### 4.5 Summarizer：记录实验
 
-调 `record_experiment(runId, entry)`，`entry`：
+调 `record_experiment(runId, entry, fromLatestBacktest=true)`：自动把最近一次回测的绩效数值填入 `metrics`、内核版本填入 `kernelVersion`（均仅在缺省时生效），AI 只需提供核心字段：
 
 ```json
 {
@@ -94,7 +95,6 @@
   "hypothesis": "20日动量叠加换手率过滤可提升年化并降低回撤",
   "changes": "factor_list 改为 mom_20；filter_list 加 turnover_rank < 0.3",
   "files": ["config.py"],
-  "metrics": { "annual_return_pct": 12.3, "max_drawdown_pct": -28.1, "sharpe_ratio": 0.9 },
   "evaluation": { "passed": false, "score": 0.33 },
   "verdict": "completed",
   "lesson": "动量窗口过短导致换手过高、回撤超标；下一轮拉长窗口并加波动率过滤"
@@ -102,7 +102,7 @@
 ```
 
 - `verdict`：`completed`（正常完成未刷新 SOTA）/ `sota`（刷新历史最优）/ `failed`（校验或回测失败）。
-- `failed` 时 `metrics`/`evaluation` 可缺省，但 `lesson` 必须写明失败原因摘要。
+- `failed` 时 `metrics`/`evaluation` 可缺省（fromLatestBacktest 可不传），但 `lesson` 必须写明失败原因摘要。
 - **`lesson` 必填且要具体**（流程要求；工具 schema 层面是 optional，靠自觉不靠报错）：哪个指标未达、差距多少、下一步假设方向。它是进化循环的核心载体。
 
 ### 4.6 循环退出
@@ -111,16 +111,17 @@
 - 达到 `evolving_n` 轮 → 退出循环。
 - 连续 2 次回测失败 → 终止（见 4.3）。
 
-## 5. 收尾：提交人工审阅
+## 5. 收尾：恢复 SOTA 与提交人工审阅
 
 1. 调 `get_run_summary(runId)` 取最终 SOTA。若全程没有任何 completed/sota 记录（全部 failed）：**不提交审阅**，输出失败总结（各轮失败原因 + `get_system_status` 诊断）后结束。
-2. 用 SOTA variant 的 metrics 再调一次 `evaluate_backtest`（同 brief.thresholds），拿带 `details` 的 evaluation。可选交叉验证：`compare_backtest_variants(runId, variantIds=[全部已完成 variant], thresholds)` 确认 SOTA 一致。
-3. 调 `submit_strategy_for_review`：
+2. **恢复库内状态到 SOTA**：循环结束时库内是最后导入的 variant，不一定是 SOTA。调 `import_strategy(<SOTA variant 的 config.py 绝对路径>)`（isolate 自动清理同组其他 variant），然后 `set_strategy_weight(name="{runId}_{sotaVariantId}", weight=1)` + `set_strategy_weight(others_except=["{runId}_{sotaVariantId}"], weight=0)`，使库内当前策略与用户将要审阅的对象一致。
+3. 用 SOTA variant 的 metrics 再调一次 `evaluate_backtest`（同 brief.thresholds），拿带 `details` 的 evaluation。可选交叉验证：`compare_backtest_variants(runId, variantIds=[全部已完成 variant], thresholds)` 确认 SOTA 一致。
+4. 调 `submit_strategy_for_review`：
    - `runId`、`variantId` = SOTA variant
    - `evaluation` = 上一步的 `{ passed, score, details }`
    - `strategyPath` = `{runId}/{variantId}/config.py`
    - `summary` = 假设演进摘要（每轮一句话）+ SOTA 指标 + 是否全部达标
-4. 生成 `candidate-report.md` 后**停止动作**，向用户汇报：SOTA variant、各指标 vs 阈值、trace 轮数、报告路径，并明确提示——**确认后才可人工导入实盘**。
+5. 生成 `candidate-report.md` 后**停止动作**，向用户汇报：SOTA variant、各指标 vs 阈值、trace 轮数、报告路径，并明确提示——**确认后才可人工导入实盘**。
 
 ## 6. 红线（必须遵守）
 
@@ -150,11 +151,12 @@ get_run_summary(runId)                        # 当前 SOTA
 write_strategy_file(runId, "v2", "config.py", <含 backtest_name="{runId}_v2">)
 validate_strategy(configFilePath=.../runId/v2/config.py)   # valid=true
 import_strategy(configFilePath=.../runId/v2/config.py)     # 不传 capWeight
-set_strategy_weight(name="{runId}_v2", weight=1)           # 启用当前 variant
-set_strategy_weight(name="<其他策略组>", weight=0)         # 逐个停用，隔离回测范围
-run_backtest()                                # 阻塞等待（带产物校验）
+set_strategy_weight(name="{runId}_v2", weight=1)            # 启用当前 variant
+set_strategy_weight(others_except=["{runId}_v2"], weight=0) # 一键停用其余组
+run_backtest()                                # 阻塞等待（带产物校验；长回测可用 run_backtest_async + get_backtest_task）
 get_backtest_performance()                    # 取 data.parsed（5 项数值指标）
 evaluate_backtest(performances=[{variantId:"v2", ...data.parsed}], thresholds=brief.thresholds)
 record_experiment(runId, {variantId:"v2", hypothesis, changes, files:["config.py"],
-                          metrics: data.parsed, evaluation:{passed, score}, verdict, lesson})
+                          evaluation:{passed, score}, verdict, lesson},
+                  fromLatestBacktest=true)    # 自动抓 metrics 与 kernelVersion
 ```

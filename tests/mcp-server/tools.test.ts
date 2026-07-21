@@ -44,6 +44,9 @@ describe("mcp tools integration", () => {
 		assert.ok(names.includes("evaluate_backtest"))
 		assert.ok(names.includes("submit_strategy_for_review"))
 		assert.ok(names.includes("set_strategy_weight"))
+		assert.ok(names.includes("list_library_strategies"))
+		assert.ok(names.includes("run_backtest_async"))
+		assert.ok(names.includes("get_backtest_task"))
 	})
 
 	it("writes and reads strategy file via MCP", async () => {

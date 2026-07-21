@@ -163,4 +163,14 @@ describe("research-run", () => {
 		})
 		assert.strictEqual(getRunSummary("run-d").sota?.variantId, "v1")
 	})
+
+	it("accepts optional kernelVersion in entry", () => {
+		const { entry } = recordExperiment("run-kv", {
+			variantId: "v1",
+			hypothesis: "h",
+			verdict: "completed",
+			kernelVersion: "zeus_bin_2.2.0",
+		})
+		assert.strictEqual(entry.kernelVersion, "zeus_bin_2.2.0")
+	})
 })

@@ -8,8 +8,20 @@
  * See the LICENSE file and https://mariadb.com/bsl11/
  */
 
-import type { LoopStatus } from "@/renderer/types/index.js"
-import { type IpcRendererEvent, ipcRenderer } from "electron"
+/** 调度器状态（与 src/main/lib/scheduler.ts 的 send-schedule-status 载荷一致） */
+type LoopStatus =
+	| "init"
+	| "error"
+	| "start"
+	| "outline"
+	| "done"
+	| "fuel_start"
+	| "aqua_start"
+	| "noTradingTime"
+	| "rocket_start"
+
+import type { IpcRendererEvent } from "electron"
+import { ipcRenderer } from "electron"
 
 export const emitterIPC = {
 	sendUpdateStatus: (callback: any) =>

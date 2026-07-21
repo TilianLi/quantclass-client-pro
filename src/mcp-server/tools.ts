@@ -36,6 +36,15 @@ import {
 } from "./strategy-files.js"
 import { validateStrategy } from "./strategy-validator.js"
 
+// 最近一次成功回测的信息缓存（供 record_experiment 的 fromLatestBacktest 使用）
+let lastBacktestInfo: {
+	at: string
+	backtestName?: string
+	kernel?: string
+	kernelVersion?: string
+	libraryType?: string
+} | null = null
+
 /**
  * 把 `field` (允许包含 dot-key, 例如 "real_market_config.account_id")
  * 与 `value` 转成 controller 端 whitelisting 期望的扁平对象:
@@ -404,12 +413,24 @@ export function registerTools(server: McpServer): void {
 
 	server.tool(
 		"run_backtest",
-		"执行策略回测。根据当前策略库类型自动选择内核（选股→aqua，仓位管理→zeus）。回测是长耗时操作（可能几分钟到几十分钟），会阻塞直到回测完成。回测期间不能同时运行实盘。建议在非交易时段使用。",
+		"执行策略回测。根据当前策略库类型自动选择内核（选股→aqua，仓位管理→zeus）。回测是长耗时操作（可能几分钟到几十分钟），会阻塞直到回测完成。回测期间不能同时运行实盘。建议在非交易时段使用。成功响应包含 backtestName、kernelVersion、durationMs、resultPath；未产出结果（内核失败）返回错误。",
 		{},
 		async () => {
 			try {
 				// 回测是长耗时操作，设置 30 分钟超时
 				const result = await post("/mcp/backtest/run", undefined, 1_800_000)
+				const data = (result as Record<string, unknown>)?.data as
+					| Record<string, unknown>
+					| undefined
+				if (data) {
+					lastBacktestInfo = {
+						at: new Date().toISOString(),
+						backtestName: data.backtestName as string | undefined,
+						kernel: data.kernel as string | undefined,
+						kernelVersion: data.kernelVersion as string | undefined,
+						libraryType: data.libraryType as string | undefined,
+					}
+				}
 				return {
 					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
 				}
@@ -419,6 +440,58 @@ export function registerTools(server: McpServer): void {
 						{
 							type: "text",
 							text: `执行回测失败: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
+					isError: true,
+				}
+			}
+		},
+	)
+
+	server.tool(
+		"run_backtest_async",
+		"异步执行策略回测：立即返回 taskId，内核在后台运行，用 get_backtest_task 轮询状态。适合长耗时回测时避免阻塞等待。注意：异步模式不做产物校验，绩效读取以 get_backtest_performance 为准。",
+		{},
+		async () => {
+			try {
+				const result = await post("/mcp/backtest/run-async", undefined, 60_000)
+				return {
+					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+				}
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `启动异步回测失败: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
+					isError: true,
+				}
+			}
+		},
+	)
+
+	server.tool(
+		"get_backtest_task",
+		"查询异步回测任务状态（run_backtest_async 返回的 taskId）。返回 status(running/success/error)、exitCode、stdout/stderr 尾部日志。",
+		{
+			taskId: z.string().describe("任务 ID（形如 zeus_12345）"),
+		},
+		async ({ taskId }) => {
+			try {
+				const result = await get(
+					`/mcp/backtest/task?taskId=${encodeURIComponent(taskId)}`,
+				)
+				return {
+					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+				}
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `查询回测任务失败: ${error instanceof Error ? error.message : String(error)}`,
 						},
 					],
 					isError: true,
@@ -531,24 +604,33 @@ export function registerTools(server: McpServer): void {
 
 	server.tool(
 		"set_strategy_weight",
-		"设置库内策略组的资金占比（0-1）。三层同步：客户端配置、界面 localStorage、real_market_25.json（zeus 回测实际读取的策略注册表）。pos 模式回测范围为全部 weight>0 策略的融合组合，回测某 variant 前应将其余策略组权重设为 0 以隔离回测范围。",
+		"设置库内策略组的资金占比（0-1），支持三种用法（三选一）：name=单个组；names=多个组（同一 weight）；others_except=一键隔离（除列出的组外全部设为 weight，通常 0）。三层同步：客户端配置、界面 localStorage、real_market_25.json。pos 模式回测范围为全部 weight>0 策略的融合组合，回测某 variant 前应将其余策略组权重设为 0 以隔离回测范围。",
 		{
 			name: z
 				.string()
-				.describe("策略组名称（精确匹配，如 run-momentum-001_v1）"),
+				.optional()
+				.describe("单个策略组名称（精确匹配，如 run-momentum-001_v1）"),
+			names: z
+				.array(z.string())
+				.optional()
+				.describe("多个策略组名称（批量设为同一 weight）"),
+			others_except: z
+				.array(z.string())
+				.optional()
+				.describe("一键隔离：除这些组外全部设为 weight（通常为 0）"),
 			weight: z
 				.number()
 				.min(0)
 				.max(1)
 				.describe("资金占比 0-1，0=停用（跳过），1=100%"),
 		},
-		async ({ name, weight }) => {
+		async ({ name, names, others_except, weight }) => {
 			try {
-				const result = await post(
-					"/mcp/strategy/weight",
-					{ name, weight },
-					60_000,
-				)
+				const body: Record<string, unknown> = { weight }
+				if (name !== undefined) body.name = name
+				if (names !== undefined) body.names = names
+				if (others_except !== undefined) body.others_except = others_except
+				const result = await post("/mcp/strategy/weight", body, 60_000)
 				return {
 					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
 				}
@@ -558,6 +640,30 @@ export function registerTools(server: McpServer): void {
 						{
 							type: "text",
 							text: `设置策略权重失败: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
+					isError: true,
+				}
+			}
+		},
+	)
+
+	server.tool(
+		"list_library_strategies",
+		"列出当前策略库（pos/select）内所有策略组的名称与资金占比。权重隔离前用此工具发现需要停用的策略组。",
+		{},
+		async () => {
+			try {
+				const result = await get("/mcp/strategy/library")
+				return {
+					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+				}
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `列出库内策略失败: ${error instanceof Error ? error.message : String(error)}`,
 						},
 					],
 					isError: true,
@@ -1048,14 +1154,45 @@ export function registerTools(server: McpServer): void {
 
 	server.tool(
 		"record_experiment",
-		"记录一次实验到 run 的 trace.jsonl（假设、变更、绩效、评估、结论、教训）。ts 缺省时自动填当前时间。",
+		"记录一次实验到 run 的 trace.jsonl（假设、变更、绩效、评估、结论、教训）。ts 缺省时自动填当前时间。fromLatestBacktest=true 时自动把最近一次回测的绩效数值填入 metrics（缺省时）、并把内核版本填入 kernelVersion（缺省时），避免手工誊抄。",
 		{
 			runId: z.string().describe("Run ID"),
 			entry: experimentEntrySchema.describe("实验记录"),
+			fromLatestBacktest: z
+				.boolean()
+				.optional()
+				.describe(
+					"true 时自动抓取最近一次回测绩效到 metrics、内核版本到 kernelVersion（仅在对应字段缺省时生效）",
+				),
 		},
-		async ({ runId, entry }) => {
+		async ({ runId, entry, fromLatestBacktest }) => {
 			try {
-				const result = recordExperiment(runId, entry)
+				const merged: Record<string, unknown> = { ...entry }
+				if (fromLatestBacktest) {
+					if (merged.metrics === undefined) {
+						const perf = (await get("/mcp/backtest/performance")) as Record<
+							string,
+							unknown
+						>
+						const parsed = (perf?.data as Record<string, unknown>)?.parsed
+						if (!parsed || typeof parsed !== "object") {
+							return {
+								content: [
+									{
+										type: "text",
+										text: "记录实验失败: fromLatestBacktest=true 但最近一次回测无绩效数据（请先成功执行 run_backtest）",
+									},
+								],
+								isError: true,
+							}
+						}
+						merged.metrics = parsed
+					}
+					if (merged.kernelVersion === undefined) {
+						merged.kernelVersion = lastBacktestInfo?.kernelVersion
+					}
+				}
+				const result = recordExperiment(runId, merged)
 				return {
 					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
 				}

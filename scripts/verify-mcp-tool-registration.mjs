@@ -27,6 +27,9 @@ const REQUIRED_TOOLS = [
 	"get_experiment_trace",
 	"get_run_summary",
 	"set_strategy_weight",
+	"list_library_strategies",
+	"run_backtest_async",
+	"get_backtest_task",
 ]
 
 async function main() {

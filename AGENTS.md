@@ -178,7 +178,7 @@ pnpm verify:mcp-tools         # 校验 MCP tool 注册（scripts/verify-mcp-tool
 
 ### 5.2 Tool 分组
 
-当前 MCP Server 共注册 **33 个 tools**（`src/mcp-server/tools.ts`），分组如下：
+当前 MCP Server 共注册 **36 个 tools**（`src/mcp-server/tools.ts`），分组如下：
 
 - **系统控制（7 个）**：
   - `get_system_status`：获取系统运行状态
@@ -196,18 +196,21 @@ pnpm verify:mcp-tools         # 校验 MCP tool 注册（scripts/verify-mcp-tool
   - `get_account_info`：账户信息
   - `get_trading_info`：Aqua 交易信息
 
-- **回测工具（6 个）**：
+- **回测工具（8 个）**：
   - `get_backtest_config`：回测配置
   - `set_backtest_config`：设置回测配置
-  - `run_backtest`：执行回测
+  - `run_backtest`：执行回测（含产物校验，响应带内核版本/耗时/产物路径）
+  - `run_backtest_async`：异步执行回测（返回 taskId）
+  - `get_backtest_task`：查询异步回测任务状态与日志尾部
   - `get_backtest_result`：回测选股结果
-  - `get_backtest_performance`：回测绩效指标
+  - `get_backtest_performance`：回测绩效指标（含 parsed 数值字段）
   - `get_backtest_equity_curve`：回测资金曲线
 
-- **策略开发闭环（11 个）**：
-  - `get_strategy_template`：获取策略开发模板
+- **策略开发闭环（12 个）**：
+  - `get_strategy_template`：获取策略开发模板（含可用因子清单）
   - `import_strategy`：导入策略
-  - `set_strategy_weight`：设置库内策略组资金占比（三层同步：config.json、localStorage、real_market_25.json）
+  - `set_strategy_weight`：设置库内策略组资金占比（单个/批量/一键隔离，三层同步）
+  - `list_library_strategies`：列出库内策略组名称与权重
   - `get_strategy_workspace_root`：获取策略工作区根目录
   - `list_strategies`：列出策略 run/variant
   - `read_strategy_file`：读取策略文件
@@ -219,7 +222,7 @@ pnpm verify:mcp-tools         # 校验 MCP tool 注册（scripts/verify-mcp-tool
 
 - **研究工作流（4 个）**：
   - `create_research_run`：创建研究 run（brief.json：目标、阈值、回测区间、进化轮数）
-  - `record_experiment`：追加实验记录到 trace.jsonl
+  - `record_experiment`：追加实验记录到 trace.jsonl（支持 fromLatestBacktest 自动抓绩效与内核版本）
   - `get_experiment_trace`：读取实验 trace（支持 tail 截断）
   - `get_run_summary`：汇总实验数、SOTA、阈值差距与指标趋势
 

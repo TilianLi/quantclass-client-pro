@@ -18,7 +18,11 @@ import {
 	getSellTimingInfoList,
 } from "@/main/core/dataList.js"
 import windowManager from "@/main/lib/WindowManager.js"
-import { execBin } from "@/main/lib/process.js"
+import {
+	backtest_task_manager,
+	execBin,
+	execBinDetached,
+} from "@/main/lib/process.js"
 import {
 	setAutoMinData,
 	setAutoTrading,
@@ -385,8 +389,90 @@ mcpRouter.post("/backtest/run", async (c: Context) => {
 
 	return c.json({
 		code: 0,
-		data: { kernel, libraryType },
+		data: {
+			kernel,
+			libraryType,
+			backtestName,
+			kernelVersion: await readKernelVersionTag(kernel),
+			durationMs: Date.now() - startedAt,
+			resultPath: csvPath,
+		},
 		message: "策略回测已完成",
+	})
+})
+
+/**
+ * POST /mcp/backtest/run-async - 异步执行策略回测
+ *
+ * 立即返回 taskId，内核在后台运行；用 GET /mcp/backtest/task 轮询状态。
+ * 注意：异步模式不做产物校验，完成与否以任务 status 为准，
+ * 绩效读取仍以 get_backtest_performance 的新鲜度为准。
+ */
+mcpRouter.post("/backtest/run-async", async (c: Context) => {
+	const libraryType = store.get(LIBRARY_TYPE, "select") as string
+	const kernel = libraryType === "pos" ? "zeus" : "aqua"
+
+	try {
+		const task = await execBinDetached(
+			["select"],
+			"MCP策略回测（异步）",
+			kernel,
+		)
+		return c.json({
+			code: 0,
+			data: {
+				taskId: task.taskId,
+				pid: task.pid,
+				kernel: task.kernel,
+				status: task.status,
+				startedAt: task.startedAt,
+			},
+			message: `回测任务已启动: ${task.taskId}`,
+		})
+	} catch (error) {
+		return c.json(
+			{
+				code: 500,
+				message: `启动回测任务失败: ${error instanceof Error ? error.message : String(error)}`,
+			},
+			500,
+		)
+	}
+})
+
+/**
+ * GET /mcp/backtest/task - 查询异步回测任务状态
+ *
+ * Query: taskId（run-async 返回的 taskId）
+ * 返回 status(running/success/error)、exitCode、stdout/stderr 尾部日志。
+ */
+mcpRouter.get("/backtest/task", async (c: Context) => {
+	const taskId = c.req.query("taskId")
+	if (!taskId) {
+		return c.json({ code: 400, message: "参数 taskId 必填" }, 400)
+	}
+	const task = backtest_task_manager.getTask(taskId)
+	if (!task) {
+		return c.json(
+			{ code: 404, message: `任务不存在: ${taskId}（可能已被清理或从未创建）` },
+			404,
+		)
+	}
+	return c.json({
+		code: 0,
+		data: {
+			taskId: task.taskId,
+			pid: task.pid,
+			kernel: task.kernel,
+			action: task.action,
+			status: task.status,
+			exitCode: task.exitCode,
+			stdoutTail: task.stdoutTail,
+			stderrTail: task.stderrTail,
+			startedAt: task.startedAt,
+			finishedAt: task.finishedAt,
+		},
+		message: "ok",
 	})
 })
 
@@ -417,11 +503,10 @@ mcpRouter.get("/backtest/result", async (c: Context) => {
 		])
 
 		if (!fs.existsSync(filePath)) {
-			return c.json({
-				code: 0,
-				data: [],
-				message: "回测结果文件不存在，请先执行回测",
-			})
+			return c.json(
+				{ code: 404, data: null, message: "回测结果文件不存在，请先执行回测" },
+				404,
+			)
 		}
 
 		const content = fs.readFileSync(filePath, "utf-8").replace(/^\uFEFF/, "")
@@ -518,6 +603,11 @@ mcpRouter.get("/strategy/template", async (c: Context) => {
 					period: "1H",
 				},
 			],
+		},
+		availableFactors: {
+			因子库: await listFactorNames("因子库"),
+			截面因子库: await listFactorNames("截面因子库"),
+			note: "内核内置因子（收盘价、换手率、近期停牌天数、异常涨跌停状态等）不可枚举，以 validate_strategy 通过为准",
 		},
 		note: "导入时可通过 capWeight 参数设置资金占比（0-1，如 1=100%），不传则重置为 0（安全默认）。回测和实盘共享同一份 real_trading/ 目录下的策略文件。",
 	}
@@ -808,6 +898,38 @@ mcpRouter.post("/strategy/import", async (c: Context) => {
 	store.set(storeKey, mergedKernelStrategies)
 	const storeUpdated = true
 
+	// -- 同步 real_market_25.json 槽位权重（尽力而为：
+	// 槽位可能尚未由 renderer 启动同步创建，此时不创建，仅提示数量）
+	let rStoreSlots = 0
+	try {
+		const candidateNames = new Set<string>(
+			libraryType === "pos"
+				? [backtestName]
+				: (finalStrategies as Array<Record<string, unknown>>)
+						.map((s) => s?.name)
+						.filter((n): n is string => typeof n === "string"),
+		)
+		for (const [key, entry] of Object.entries(rStore.store ?? {})) {
+			if (!key.startsWith("strategy_")) continue
+			const e = entry as Record<string, unknown> | undefined
+			if (typeof e?.name !== "string") continue
+			for (const n of candidateNames) {
+				if (
+					e.name === n ||
+					e.name.endsWith(`-${n}`) ||
+					e.name.endsWith(`.${n}`) ||
+					e.name.includes(`-${n}#`)
+				) {
+					rStore.set(`${key}.strategy_weight`, weight)
+					rStoreSlots++
+					break
+				}
+			}
+		}
+	} catch (error) {
+		console.error("[MCP] 同步 real_market_25 槽位权重失败:", error)
+	}
+
 	// -- 通过 executeJavaScript 将新策略追加到前端 localStorage，使界面同步更新
 	const mainWindow = windowManager.getWindow()
 	let localStorageUpdated = false
@@ -863,6 +985,7 @@ mcpRouter.post("/strategy/import", async (c: Context) => {
 			reTiming: parseResult.re_timing ?? null,
 			localStorageUpdated,
 			storeUpdated,
+			rStoreSlots,
 			isolate,
 			removedCount,
 		},
@@ -871,22 +994,69 @@ mcpRouter.post("/strategy/import", async (c: Context) => {
 })
 
 /**
- * POST /mcp/strategy/weight - 设置策略资金占比
+ * GET /mcp/strategy/library - 列出库内策略组（仅名称与权重）
+ *
+ * 供权重隔离前发现需要停用的策略组，响应保持精简。
+ */
+mcpRouter.get("/strategy/library", async (c: Context) => {
+	const libraryType = store.get(LIBRARY_TYPE, "select") as string
+	const storeKey =
+		libraryType === "pos" ? "pos_mgmt.strategies" : "select_stock.strategy_list"
+	const list = (store.get(storeKey, []) as Array<Record<string, unknown>>) ?? []
+	const strategies = list.map((g) => ({
+		name: g?.name,
+		cap_weight: g?.cap_weight,
+	}))
+	return c.json({
+		code: 0,
+		data: { libraryType, count: strategies.length, strategies },
+		message: "ok",
+	})
+})
+
+/**
+ * POST /mcp/strategy/weight - 设置策略资金占比（支持单个/批量/一键隔离）
+ *
+ * 三种用法（三选一）：
+ * - name: 单个策略组
+ * - names: 多个策略组（同一 weight）
+ * - others_except: 一键隔离——除列出的组外全部设为 weight（通常为 0）
  *
  * 三层同步：config.json（electron-store）、renderer localStorage（界面与
  * 启动全量同步源）、real_market_25.json（zeus 实际读取的策略注册表）。
  * 注意：pos 模式回测范围为全部 weight>0 策略的融合组合，回测某个
- * variant 前应先用本接口将其余策略组权重设为 0。
+ * variant 前应将其余策略组权重设为 0。
  */
 mcpRouter.post("/strategy/weight", async (c: Context) => {
 	const body = await c.req.json().catch(() => ({}))
-	const { name, weight } = body as { name?: string; weight?: number }
-
-	if (!name || typeof name !== "string") {
-		return c.json({ code: 400, message: "参数 name 必填（策略组名称）" }, 400)
+	const { name, names, others_except, weight } = body as {
+		name?: string
+		names?: string[]
+		others_except?: string[]
+		weight?: number
 	}
+
 	if (typeof weight !== "number" || weight < 0 || weight > 1) {
 		return c.json({ code: 400, message: "参数 weight 必须是 0-1 的数字" }, 400)
+	}
+	const modes = [name, names, others_except].filter((v) => v !== undefined)
+	if (modes.length !== 1) {
+		return c.json(
+			{ code: 400, message: "name / names / others_except 必须且只能提供一个" },
+			400,
+		)
+	}
+	if (names !== undefined && (!Array.isArray(names) || names.length === 0)) {
+		return c.json({ code: 400, message: "names 必须是非空字符串数组" }, 400)
+	}
+	if (
+		others_except !== undefined &&
+		(!Array.isArray(others_except) || others_except.length === 0)
+	) {
+		return c.json(
+			{ code: 400, message: "others_except 必须是非空字符串数组" },
+			400,
+		)
 	}
 
 	const libraryType = store.get(LIBRARY_TYPE, "select") as string
@@ -894,9 +1064,35 @@ mcpRouter.post("/strategy/weight", async (c: Context) => {
 		libraryType === "pos" ? "pos_mgmt.strategies" : "select_stock.strategy_list"
 	const list = (store.get(storeKey, []) as Array<Record<string, unknown>>) ?? []
 
+	// 计算目标策略组集合
+	const targets = new Set<string>()
+	const matchedNames: string[] = []
+	const missingNames: string[] = []
+	if (others_except !== undefined) {
+		for (const item of list) {
+			const n = item?.name as string
+			if (n && !others_except.includes(n)) {
+				targets.add(n)
+				matchedNames.push(n)
+			}
+		}
+	} else {
+		const wanted = name !== undefined ? [name] : (names as string[])
+		const existing = new Set(list.map((i) => i?.name as string))
+		for (const n of wanted) {
+			if (existing.has(n)) {
+				targets.add(n)
+				matchedNames.push(n)
+			} else {
+				missingNames.push(n)
+			}
+		}
+	}
+
 	let matched = 0
 	for (const item of list) {
-		if (item?.name !== name) continue
+		const n = item?.name as string
+		if (!n || !targets.has(n)) continue
 		matched++
 		item.cap_weight = weight
 		if (Array.isArray(item.strategy_list)) {
@@ -911,7 +1107,7 @@ mcpRouter.post("/strategy/weight", async (c: Context) => {
 		return c.json(
 			{
 				code: 404,
-				message: `未找到策略: ${name}，当前库内策略: ${available.join("、") || "（空）"}`,
+				message: `未找到策略: ${[name, ...(names ?? [])].filter(Boolean).join("、")}，当前库内策略: ${available.join("、") || "（空）"}`,
 			},
 			404,
 		)
@@ -929,7 +1125,7 @@ mcpRouter.post("/strategy/weight", async (c: Context) => {
 			const js = `
 				(function() {
 					var key = ${JSON.stringify(storageKey)};
-					var target = ${JSON.stringify(name)};
+					var targets = ${JSON.stringify([...targets])};
 					var w = ${JSON.stringify(weight)};
 					var list = [];
 					try {
@@ -939,7 +1135,7 @@ mcpRouter.post("/strategy/weight", async (c: Context) => {
 					var n = 0;
 					for (var i = 0; i < list.length; i++) {
 						var item = list[i];
-						if (!item || item.name !== target) continue;
+						if (!item || targets.indexOf(item.name) < 0) continue;
 						n++;
 						item.cap_weight = w;
 						if (Array.isArray(item.strategy_list)) {
@@ -964,15 +1160,24 @@ mcpRouter.post("/strategy/weight", async (c: Context) => {
 		}
 	}
 
-	// -- 同步 real_market_25.json（zeus 回测实际读取的策略注册表）
+	// -- 同步 real_market_25.json（zeus 实际读取的策略注册表）
 	let rStoreSlots = 0
 	try {
 		for (const [key, entry] of Object.entries(rStore.store ?? {})) {
 			if (!key.startsWith("strategy_")) continue
 			const e = entry as Record<string, unknown> | undefined
-			if (typeof e?.name === "string" && e.name.endsWith(`-${name}`)) {
-				rStore.set(`${key}.strategy_weight`, weight)
-				rStoreSlots++
+			if (typeof e?.name !== "string") continue
+			for (const n of targets) {
+				if (
+					e.name === n ||
+					e.name.endsWith(`-${n}`) ||
+					e.name.endsWith(`.${n}`) ||
+					e.name.includes(`-${n}#`)
+				) {
+					rStore.set(`${key}.strategy_weight`, weight)
+					rStoreSlots++
+					break
+				}
 			}
 		}
 	} catch (error) {
@@ -982,14 +1187,15 @@ mcpRouter.post("/strategy/weight", async (c: Context) => {
 	return c.json({
 		code: 0,
 		data: {
-			name,
 			weight,
 			libraryType,
 			matched,
+			matchedNames,
+			missingNames: missingNames.length > 0 ? missingNames : undefined,
 			localStorageUpdated,
 			rStoreSlots,
 		},
-		message: `已设置 ${name} 资金占比为 ${(weight * 100).toFixed(1)}%（匹配 ${matched} 组，real_market_25 槽位 ${rStoreSlots} 个）`,
+		message: `已设置 ${matched} 个策略组资金占比为 ${(weight * 100).toFixed(1)}%${missingNames.length > 0 ? `（未找到: ${missingNames.join("、")}）` : ""}`,
 	})
 })
 
@@ -1055,6 +1261,49 @@ function parseMetricNumber(value: string | undefined): number | undefined {
 	if (!value) return undefined
 	const match = value.replace(/,/g, "").match(/-?\d+(?:\.\d+)?/)
 	return match ? Number.parseFloat(match[0]) : undefined
+}
+
+/** 读取内核版本标识（如 zeus_bin_2.2.0；无对应 yml 时返回 undefined） */
+async function readKernelVersionTag(
+	kernel: string,
+): Promise<string | undefined> {
+	try {
+		const codePath = await storeApi.getAllDataPath(["code"])
+		const yml = fs
+			.readdirSync(codePath)
+			.find((f) => f.startsWith(kernel) && f.endsWith(".yml"))
+		return yml?.replace(/\.yml$/, "")
+	} catch {
+		return undefined
+	}
+}
+
+/** 扫描因子库目录，返回因子名列表（子目录映射为 类目.名，跳过 __init__.py） */
+async function listFactorNames(dirName: string): Promise<string[]> {
+	try {
+		const root = await storeApi.getAllDataPath(["real_trading", dirName])
+		if (!fs.existsSync(root)) return []
+		const names: string[] = []
+		for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+			if (
+				entry.isFile() &&
+				entry.name.endsWith(".py") &&
+				entry.name !== "__init__.py"
+			) {
+				names.push(entry.name.replace(/\.py$/, ""))
+			} else if (entry.isDirectory()) {
+				const sub = path.join(root, entry.name)
+				for (const f of fs.readdirSync(sub)) {
+					if (f.endsWith(".py") && f !== "__init__.py") {
+						names.push(`${entry.name}.${f.replace(/\.py$/, "")}`)
+					}
+				}
+			}
+		}
+		return names.sort()
+	} catch {
+		return []
+	}
 }
 
 /**
@@ -1161,11 +1410,10 @@ mcpRouter.get("/backtest/equity-curve", async (c: Context) => {
 		])
 
 		if (!fs.existsSync(filePath)) {
-			return c.json({
-				code: 0,
-				data: [],
-				message: "资金曲线文件不存在，请先执行回测",
-			})
+			return c.json(
+				{ code: 404, data: null, message: "资金曲线文件不存在，请先执行回测" },
+				404,
+			)
 		}
 
 		const stepRaw = Number.parseInt(c.req.query("step") ?? "1", 10)

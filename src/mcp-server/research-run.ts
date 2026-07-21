@@ -78,6 +78,7 @@ export const experimentEntrySchema = z.object({
 		.optional(),
 	verdict: z.enum(["completed", "sota", "failed"]),
 	lesson: z.string().optional(),
+	kernelVersion: z.string().optional(),
 })
 
 export type ResearchBrief = z.infer<typeof researchBriefSchema>
