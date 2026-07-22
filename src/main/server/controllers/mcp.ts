@@ -714,8 +714,8 @@ mcpRouter.post("/strategy/import", async (c: Context) => {
 	// -- 复制策略文件（路径与原有逻辑一致）
 	const realTradingPath = await storeApi.getAllDataPath(["real_trading"], true)
 
-	const copyFiles = (sourcePath: string, targetPath: string) => {
-		if (fs.existsSync(targetPath)) {
+	const copyFiles = (sourcePath: string, targetPath: string, merge = false) => {
+		if (fs.existsSync(targetPath) && !merge) {
 			fs.rmSync(targetPath, { recursive: true, force: true })
 		}
 		fs.mkdirSync(targetPath, { recursive: true })
@@ -724,7 +724,7 @@ mcpRouter.post("/strategy/import", async (c: Context) => {
 			const sourceFile = path.join(sourcePath, file)
 			const targetFile = path.join(targetPath, file)
 			if (fs.statSync(sourceFile).isDirectory()) {
-				copyFiles(sourceFile, targetFile)
+				copyFiles(sourceFile, targetFile, merge)
 			} else {
 				fs.copyFileSync(sourceFile, targetFile)
 			}
@@ -734,6 +734,10 @@ mcpRouter.post("/strategy/import", async (c: Context) => {
 	const rootPath = path.dirname(configFilePath)
 
 	// -- 复制策略库/因子库/信号库/截面因子库/外部数据（与原有一致）
+	// 注意：因子库/信号库/截面因子库 是各策略共享的平铺命名空间，
+	// 采用合并复制（仅覆盖同名文件），避免携带部分库的导入清空其他策略
+	// 依赖的因子文件（原替换式复制会导致「因子缺少依赖」连锁崩溃）。
+	const MERGE_DIRS = new Set(["因子库", "信号库", "截面因子库"])
 	const dirsToCopy: Array<[string, string]> = [
 		["策略库", path.join(realTradingPath, "策略库")],
 		["因子库", path.join(realTradingPath, "因子库")],
@@ -755,7 +759,7 @@ mcpRouter.post("/strategy/import", async (c: Context) => {
 	for (const [dirName, targetPath] of dirsToCopy) {
 		const sourcePath = path.join(rootPath, dirName)
 		if (fs.existsSync(sourcePath)) {
-			copyFiles(sourcePath, targetPath)
+			copyFiles(sourcePath, targetPath, MERGE_DIRS.has(dirName))
 			copiedDirs.push(dirName)
 		}
 	}

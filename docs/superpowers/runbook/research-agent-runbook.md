@@ -64,7 +64,12 @@
    - **`strategy_list` 中每个策略的 `name` 也设为 `"{runId}_{variantId}"`**。关键原因：默认选股库（select）下，isolate 删除旧 variant 时比对的是 store 中已有策略条目的 `name` 字段，而该字段来自 `strategy_list[*].name`，不是 `backtest_name`——若策略名不带 `{runId}_v` 前缀，旧 variant 的策略会逐轮累积，污染后续回测。多策略时可加后缀区分（如 `{runId}_{variantId}_a`），只要保持 `{runId}_v` 前缀即可被 isolate 命中
 3. 调 `validate_strategy(configFilePath=<工作区绝对路径>/{runId}/{variantId}/config.py)`，返回 `{ valid, errors, extracted? }`。
 4. 校验失败：读 `errors` 逐条修复（常见问题：缺必填变量、Python 语法错误、`因子文件不存在`、`择时信号文件不存在`），重写文件后重新校验。**单 variant 最多修正 3 次**；仍失败 → 跳到 4.5 记 `failed`，进入下一轮。
-5. **已知限制**：`write_strategy_file` 的 `filename` 不允许含 `/`、`\`、`..`，即只能写 variant 根目录下的平铺文件。本期**不要**尝试写入 `因子库/`、`信号库/` 子目录文件；自定义因子不可行，只使用 real_trading 已有因子与信号。
+5. **自定义因子（受限开放，走闸门流程）**：假设需要新因子时：
+   - 用 `write_factor_file(runId, variantId, category, factorName, content)` 写入——**写入前强制静态检查**：仅允许 pandas/numpy/math 等纯计算库 import + `fin_cols`/`add_factor` 接口契约；禁止 os/sys/subprocess/网络/IO/exec/eval/dunder 访问，不通过则拒绝写入；自动补齐 `__init__.py`
+   - 因子契约：模块级 `fin_cols = []` + `def add_factor(df, param=None, **kwargs)`，函数内用 `kwargs['col_name']` 设列并 `return df[[col_name]]`；因子基于**后复权**数据计算（成交用原始价，双轨制）
+   - `validate_strategy` 对 variant 因子库做同一套检查（绕过工具手工放置的因子同样会被拦截）
+   - 静态闸门之外，**内核回测是最终功能闸门**（产物校验会捕捉因子运行时错误）；失败按 4.3/第 7 节处理
+   - 仍未开放：`信号库` 与个股择时（1H/1D 对齐反馈差）、直接写 real_trading（永远只写 variant 本地）
 
 ### 4.3 Runner：导入、权重隔离与回测
 

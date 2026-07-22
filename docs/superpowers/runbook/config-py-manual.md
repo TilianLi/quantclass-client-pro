@@ -99,9 +99,22 @@ zeus 2.2 成交价用 `["t_wap", 时间, 拆单间隔, 拆单金额, 1.005]` 模
 - `类目.名`（如 `动量.动量20`）→ `因子库/类目/名.py`；裸名（如 `市值`）→ `因子库/名.py` 或内核内置因子
 - 解析顺序：`因子库` 优先于 `截面因子库`，同名先命中先用
 - **子目录必须含 `__init__.py`**（内核按 Python 模块 import，缺则 ModuleNotFoundError 全崩）
-- **当前不要自定义因子**（MCP 只能写平铺文件 + 内核执行代码的安全边界 + 归因纪律，详见 runbook §4.2）。只用：
+- **自定义因子走 `write_factor_file` 闸门**（受限开放）：写入前强制 AST 静态检查（仅纯计算库 + `fin_cols`/`add_factor` 契约，禁 IO/网络/exec 等），自动补 `__init__.py`；绕过工具手工放置的因子会被 `validate_strategy` 用同一套检查拦截。因子契约：
+
+```python
+import pandas as pd
+
+fin_cols = []  # 需要财务数据列时在此声明，否则留空
+
+def add_factor(df: pd.DataFrame, param=None, **kwargs) -> pd.DataFrame:
+    col_name = kwargs['col_name']
+    df[col_name] = df['收盘价'].pct_change(20)  # 你的计算
+    return df[[col_name]]
+```
+
+- 也可用因子（无需自己写）：
   - 内核内置因子：`收盘价`、`换手率`、`流通市值`、`近期停牌天数`、`异常涨跌停状态` 等（不可枚举，以 validate 通过为准）
-  - real_trading 文件因子（随导入变化）：`市值`、`动量.动量20`、`波动.波动率20`、`规模.成交额Mean` 等
+  - real_trading 文件因子（随导入变化）：`市值`、`动量.动量20`、`波动.波动率20`、`规模.成交额Mean` 等，`get_strategy_template` 的 `availableFactors` 可查当前清单
 - 验证手段：`validate_strategy` 会检查每个引用因子的文件存在性，报「因子文件不存在: X」即换个可用因子
 - 因子计算用**后复权**数据，模拟成交用**原始价**（除权日靠 `前收盘价` 衔接）——理解指标时要知道这个双轨制
 

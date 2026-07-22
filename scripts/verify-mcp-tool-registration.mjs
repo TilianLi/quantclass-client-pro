@@ -30,6 +30,7 @@ const REQUIRED_TOOLS = [
 	"list_library_strategies",
 	"run_backtest_async",
 	"get_backtest_task",
+	"write_factor_file",
 ]
 
 async function main() {

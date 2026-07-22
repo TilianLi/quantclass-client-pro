@@ -12,6 +12,7 @@ import { execFileSync } from "node:child_process"
 import {
 	existsSync,
 	mkdtempSync,
+	readFileSync,
 	readdirSync,
 	rmSync,
 	statSync,
@@ -19,6 +20,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
+import { checkFactorSource } from "./factor-check.ts"
 
 const REQUIRED_VARS = ["backtest_name", "strategy_list"]
 
@@ -172,6 +174,36 @@ function validateFactorLibrary(configDir: string): string[] {
 }
 
 /**
+ * 校验策略目录下因子库中每个因子源码（语法 + AST 白名单 + 接口）。
+ * 与 write_factor_file 使用同一套静态检查，防止绕过工具手工放置的因子。
+ */
+function validateFactorContents(configDir: string): string[] {
+	const errors: string[] = []
+	const factorLibDir = join(configDir, "因子库")
+	if (!existsSync(factorLibDir)) return errors
+
+	function walk(dir: string) {
+		for (const entry of readdirSync(dir)) {
+			const fullPath = join(dir, entry)
+			const stat = statSync(fullPath)
+			if (stat.isDirectory()) {
+				walk(fullPath)
+			} else if (entry.endsWith(".py") && entry !== "__init__.py") {
+				const rel = fullPath.replace(`${configDir}/`, "")
+				const check = checkFactorSource(readFileSync(fullPath, "utf-8"))
+				if (!check.ok) {
+					for (const e of check.errors) {
+						errors.push(`${rel}: ${e}`)
+					}
+				}
+			}
+		}
+	}
+	walk(factorLibDir)
+	return errors
+}
+
+/**
  * 解析因子名称对应的候选文件路径
  */
 function resolveFactorPaths(
@@ -237,6 +269,8 @@ export function validateStrategy(configPath: string): ValidationResult {
 		// -- 因子库结构检查
 		const configDir = dirname(configPath)
 		errors.push(...validateFactorLibrary(configDir))
+		// -- 因子源码内容检查（语法 + AST 白名单 + 接口）
+		errors.push(...validateFactorContents(configDir))
 
 		// -- 因子/信号存在性检查
 		const strategyList = Array.isArray(extracted.strategy_list)

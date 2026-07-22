@@ -178,7 +178,7 @@ pnpm verify:mcp-tools         # 校验 MCP tool 注册（scripts/verify-mcp-tool
 
 ### 5.2 Tool 分组
 
-当前 MCP Server 共注册 **36 个 tools**（`src/mcp-server/tools.ts`），分组如下：
+当前 MCP Server 共注册 **37 个 tools**（`src/mcp-server/tools.ts`），分组如下：
 
 - **系统控制（7 个）**：
   - `get_system_status`：获取系统运行状态
@@ -206,7 +206,7 @@ pnpm verify:mcp-tools         # 校验 MCP tool 注册（scripts/verify-mcp-tool
   - `get_backtest_performance`：回测绩效指标（含 parsed 数值字段）
   - `get_backtest_equity_curve`：回测资金曲线
 
-- **策略开发闭环（12 个）**：
+- **策略开发闭环（13 个）**：
   - `get_strategy_template`：获取策略开发模板（含可用因子清单）
   - `import_strategy`：导入策略
   - `set_strategy_weight`：设置库内策略组资金占比（单个/批量/一键隔离，三层同步）
@@ -215,6 +215,7 @@ pnpm verify:mcp-tools         # 校验 MCP tool 注册（scripts/verify-mcp-tool
   - `list_strategies`：列出策略 run/variant
   - `read_strategy_file`：读取策略文件
   - `write_strategy_file`：写入策略文件
+  - `write_factor_file`：写入自定义因子（AST 白名单静态检查后落盘，自动补 __init__.py）
   - `validate_strategy`：校验 config.py
   - `evaluate_backtest`：评估多次回测结果
   - `compare_backtest_variants`：按阈值对比多个 variant 绩效并返回最优
@@ -305,6 +306,7 @@ pnpm test:mcp                 # 运行 tests/mcp-server/**/*.test.ts
 - `backtest-evaluator.test.ts`
 - `strategy-files.test.ts`
 - `strategy-validator.test.ts`
+- `factor-check.test.ts`
 - `tools.test.ts`
 - `review-submitter.test.ts`
 - `research-run.test.ts`

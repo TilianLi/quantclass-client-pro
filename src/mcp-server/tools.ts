@@ -18,6 +18,7 @@ import {
 	performanceCsvToMetrics,
 } from "./backtest-evaluator.js"
 import { get, post, put } from "./client.js"
+import { checkFactorSource } from "./factor-check.js"
 import {
 	createResearchRun,
 	experimentEntrySchema,
@@ -32,6 +33,7 @@ import {
 	listRuns,
 	listVariants,
 	readStrategyFile,
+	writeFactorFile,
 	writeStrategyFile,
 } from "./strategy-files.js"
 import { validateStrategy } from "./strategy-validator.js"
@@ -908,6 +910,77 @@ export function registerTools(server: McpServer): void {
 						{
 							type: "text",
 							text: `写入失败: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
+					isError: true,
+				}
+			}
+		},
+	)
+
+	server.tool(
+		"write_factor_file",
+		"写入自定义因子文件到 variant 的 因子库/<category>/<factorName>.py（自动补 __init__.py）。写入前强制静态检查：仅允许 pandas/numpy/math 等纯计算库与 add_factor 接口，禁止 os/sys/subprocess/网络/IO/exec/eval 等。检查不通过则拒绝写入。",
+		{
+			runId: z.string().describe("Run ID"),
+			variantId: z.string().describe("Variant ID，例如 v1"),
+			category: z.string().describe("因子类目（如 动量、波动、规模）"),
+			factorName: z.string().describe("因子名（如 动量5，不含 .py 后缀）"),
+			content: z.string().describe("因子源码（须含 fin_cols 与 add_factor）"),
+		},
+		async ({ runId, variantId, category, factorName, content }) => {
+			try {
+				const check = checkFactorSource(content)
+				if (!check.ok) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify(
+									{
+										success: false,
+										reason: "因子静态检查未通过，未写入",
+										errors: check.errors,
+										warnings: check.warnings,
+									},
+									null,
+									2,
+								),
+							},
+						],
+						isError: true,
+					}
+				}
+				const filePath = writeFactorFile(
+					runId,
+					variantId,
+					category,
+					factorName,
+					content,
+				)
+				return {
+					content: [
+						{
+							type: "text",
+							text: JSON.stringify(
+								{
+									success: true,
+									path: filePath,
+									warnings: check.warnings,
+									interface: check.interface,
+								},
+								null,
+								2,
+							),
+						},
+					],
+				}
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `写入因子失败: ${error instanceof Error ? error.message : String(error)}`,
 						},
 					],
 					isError: true,
