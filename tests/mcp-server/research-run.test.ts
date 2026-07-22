@@ -173,4 +173,52 @@ describe("research-run", () => {
 		})
 		assert.strictEqual(entry.kernelVersion, "zeus_bin_2.2.0")
 	})
+
+	it("creates a research run with validation window", () => {
+		const { brief } = createResearchRun("run-val", {
+			...BRIEF,
+			validation: { start_date: "2025-01-01", end_date: null },
+		})
+		assert.strictEqual(brief.validation?.start_date, "2025-01-01")
+		assert.strictEqual(brief.validation?.end_date, null)
+	})
+
+	it("prefers lower complexity over annual return on score tie", () => {
+		recordExperiment("run-cx", {
+			variantId: "v1",
+			hypothesis: "h1",
+			metrics: { annual_return_pct: 20 },
+			evaluation: { passed: false, score: 0.5 },
+			verdict: "completed",
+			complexity: 8,
+		})
+		recordExperiment("run-cx", {
+			variantId: "v2",
+			hypothesis: "h2",
+			metrics: { annual_return_pct: 10 },
+			evaluation: { passed: false, score: 0.5 },
+			verdict: "completed",
+			complexity: 3,
+		})
+		assert.strictEqual(getRunSummary("run-cx").sota?.variantId, "v2")
+	})
+
+	it("falls back to annual return when complexity absent", () => {
+		recordExperiment("run-cy", {
+			variantId: "v1",
+			hypothesis: "h1",
+			metrics: { annual_return_pct: 20 },
+			evaluation: { passed: false, score: 0.5 },
+			verdict: "completed",
+		})
+		recordExperiment("run-cy", {
+			variantId: "v2",
+			hypothesis: "h2",
+			metrics: { annual_return_pct: 10 },
+			evaluation: { passed: false, score: 0.5 },
+			verdict: "completed",
+			complexity: 3,
+		})
+		assert.strictEqual(getRunSummary("run-cy").sota?.variantId, "v1")
+	})
 })

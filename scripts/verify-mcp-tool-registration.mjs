@@ -31,6 +31,7 @@ const REQUIRED_TOOLS = [
 	"run_backtest_async",
 	"get_backtest_task",
 	"write_factor_file",
+	"run_walkforward",
 ]
 
 async function main() {

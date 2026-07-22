@@ -36,6 +36,19 @@ export interface CandidateReport {
 	}
 	strategyPath: string
 	summary: string
+	/** 样本外验证窗口（如 "2025-01-01 至今"），与 oosEvaluation 配套 */
+	oosWindow?: string
+	/** 样本外评估结果（与 evaluation 同构），缺省则不渲染样本外小节 */
+	oosEvaluation?: {
+		passed: boolean
+		score: number
+		details: Record<
+			string,
+			{ value: number; threshold?: number | undefined; passed: boolean }
+		>
+	}
+	/** 样本外评估结论（AI 按余量规则给出的文字判断） */
+	oosNote?: string
 }
 
 export function generateCandidateReport(params: CandidateReport): string {
@@ -47,17 +60,44 @@ export function generateCandidateReport(params: CandidateReport): string {
 		`- **策略路径**: ${params.strategyPath}`,
 		`- **综合达标**: ${params.evaluation.passed ? "✅ 通过" : "⚠️ 未完全达标（当前最优）"}`,
 		`- **得分**: ${(params.evaluation.score * 100).toFixed(1)}%`,
+	]
+
+	if (params.oosEvaluation) {
+		lines.push(
+			`- **样本外（${params.oosWindow ?? "验证窗口"}）**: ${params.oosEvaluation.passed ? "✅ 通过" : "❌ 未通过"}`,
+		)
+	}
+
+	lines.push(
 		"",
 		"## 绩效指标",
 		"",
 		"| 指标 | 实际值 | 阈值 | 是否达标 |",
 		"|------|--------|------|----------|",
-	]
+	)
 
 	for (const [key, detail] of Object.entries(params.evaluation.details)) {
 		lines.push(
 			`| ${key} | ${detail.value.toFixed(2)} | ${detail.threshold ?? "-"} | ${detail.passed ? "✅" : "❌"} |`,
 		)
+	}
+
+	if (params.oosEvaluation) {
+		lines.push(
+			"",
+			`## 样本外验证（${params.oosWindow ?? "验证窗口"}）`,
+			"",
+			"| 指标 | 实际值 | 阈值 | 是否达标 |",
+			"|------|--------|------|----------|",
+		)
+		for (const [key, detail] of Object.entries(params.oosEvaluation.details)) {
+			lines.push(
+				`| ${key} | ${detail.value.toFixed(2)} | ${detail.threshold ?? "-"} | ${detail.passed ? "✅" : "❌"} |`,
+			)
+		}
+		if (params.oosNote) {
+			lines.push("", `> ${params.oosNote}`)
+		}
 	}
 
 	lines.push("", "## 策略说明", "", params.summary, "")

@@ -48,6 +48,7 @@ describe("mcp tools integration", () => {
 		assert.ok(names.includes("run_backtest_async"))
 		assert.ok(names.includes("get_backtest_task"))
 		assert.ok(names.includes("write_factor_file"))
+		assert.ok(names.includes("run_walkforward"))
 	})
 
 	it("writes and reads strategy file via MCP", async () => {

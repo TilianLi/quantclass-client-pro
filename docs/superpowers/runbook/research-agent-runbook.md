@@ -31,9 +31,10 @@
 
 1. 调 `create_research_run`，参数：
    - `runId`：用户给定或自拟（如 `run-momentum-001`；不得以 `_v数字` 结尾）
-   - `brief`：`{ goal, universe?, thresholds, backtest?, constraints?, evolving_n? }`
+   - `brief`：`{ goal, universe?, thresholds, backtest?, validation?, constraints?, evolving_n? }`
      - `thresholds` 的 key 只能从这 5 个里选：`annual_return_pct`、`max_drawdown_pct`、`sharpe_ratio`、`win_rate_pct`、`profit_loss_ratio`（至少给 1 个）
      - `backtest` 字段对应 `set_backtest_config` 白名单：`initial_cash`(number)、`start_date`("YYYY-MM-DD")、`end_date`("YYYY-MM-DD" 或 null)、`filter_kcb`/`filter_cyb`/`filter_bj`("0"/"1" 字符串)
+     - **`validation`（样本外窗口，结构同 backtest，强烈建议提供）**：防过拟合的核心纪律——**进化循环只能使用 `backtest` 窗口，`validation` 窗口在循环期间禁止用于任何回测**，仅在第 5 节收尾时用于一次 SOTA 复核。例如 backtest=2023-01-01→2024-12-31、validation=2025-01-01→今
      - `evolving_n`：最大进化轮数，缺省按 5 执行
 2. 若返回「run 已存在」错误：**这是恢复信号，不是失败**。改调 `get_experiment_trace(runId)` + `get_run_summary(runId)`，从 trace 中最大 variantId 序号 +1 继续（trace 为空则从 v1 开始）。不要试图删除或重建 run。
 3. 初始化或恢复后，按 `brief.backtest` 调一次 `set_backtest_config`（只传 brief 里有的字段）。
@@ -109,6 +110,7 @@
 
 - `verdict`：`completed`（正常完成未刷新 SOTA）/ `sota`（刷新历史最优）/ `failed`（校验或回测失败）。
 - `failed` 时 `metrics`/`evaluation` 可缺省（fromLatestBacktest 可不传），但 `lesson` 必须写明失败原因摘要。
+- `complexity`（旋钮计数）：填 `factor_list` + `filter_list` + `filter_list_post` + `cross_sections` 的条目总数。SOTA 同分时**复杂度低者优先**（防过拟合的正则项），都不填才退回比年化。
 - **`lesson` 必填且要具体**（流程要求；工具 schema 层面是 optional，靠自觉不靠报错）：哪个指标未达、差距多少、下一步假设方向。它是进化循环的核心载体。
 
 ### 4.6 循环退出
@@ -117,17 +119,25 @@
 - 达到 `evolving_n` 轮 → 退出循环。
 - 连续 2 次回测失败 → 终止（见 4.3）。
 
-## 5. 收尾：恢复 SOTA 与提交人工审阅
+## 5. 收尾：样本外复核、恢复 SOTA 与提交人工审阅
 
 1. 调 `get_run_summary(runId)` 取最终 SOTA。若全程没有任何 completed/sota 记录（全部 failed）：**不提交审阅**，输出失败总结（各轮失败原因 + `get_system_status` 诊断）后结束。
-2. **恢复库内状态到 SOTA**：循环结束时库内是最后导入的 variant，不一定是 SOTA。调 `import_strategy(<SOTA variant 的 config.py 绝对路径>)`（isolate 自动清理同组其他 variant），然后 `set_strategy_weight(name="{runId}_{sotaVariantId}", weight=1)` + `set_strategy_weight(others_except=["{runId}_{sotaVariantId}"], weight=0)`，使库内当前策略与用户将要审阅的对象一致。
-3. 用 SOTA variant 的 metrics 再调一次 `evaluate_backtest`（同 brief.thresholds），拿带 `details` 的 evaluation。可选交叉验证：`compare_backtest_variants(runId, variantIds=[全部已完成 variant], thresholds)` 确认 SOTA 一致。
+2. **样本外复核（brief 含 validation 时必做）**：
+   - 调 `set_backtest_config` 切到 `brief.validation` 窗口（只传 brief 里有的字段），**恢复库内状态到 SOTA**（`import_strategy(<SOTA config.py 绝对路径>)` → `set_strategy_weight(name=SOTA名, weight=1)` + `others_except=[SOTA名], weight=0`），然后 `run_backtest` 一次，取 `data.parsed`
+   - 用同一 `brief.thresholds` 调 `evaluate_backtest` 得到 OOS 的 `passed/score/details`
+   - 按余量规则写 `oosNote`（文字判断）：
+     ① OOS 各阈值项是否仍达标；② OOS 年化 ≥ 样本内年化的 50% 为可接受，低于为退化；
+     ③ OOS 回撤绝对值 ≤ 样本内的 1.5 倍为可接受；④ 与 IS 结果显著背离时必须在 oosNote 中说明可能原因
+   - 复核完成后把 `set_backtest_config` 切回 `brief.backtest` 窗口（若后续还要继续进化）
+   - **可选加深**：用 `run_walkforward(windows=[多个窗口])` 对 SOTA 做多窗口稳健性检查（返回各窗口绩效与最劣年化/年化中位/最差回撤汇总）
+3. 用 SOTA variant 的**样本内** metrics 再调一次 `evaluate_backtest`（同 brief.thresholds），拿带 `details` 的 IS evaluation。可选交叉验证：`compare_backtest_variants(runId, variantIds=[全部已完成 variant], thresholds)` 确认 SOTA 一致。
 4. 调 `submit_strategy_for_review`：
    - `runId`、`variantId` = SOTA variant
-   - `evaluation` = 上一步的 `{ passed, score, details }`
+   - `evaluation` = 上一步的样本内 `{ passed, score, details }`
    - `strategyPath` = `{runId}/{variantId}/config.py`
    - `summary` = 假设演进摘要（每轮一句话）+ SOTA 指标 + 是否全部达标
-5. 生成 `candidate-report.md` 后**停止动作**，向用户汇报：SOTA variant、各指标 vs 阈值、trace 轮数、报告路径，并明确提示——**确认后才可人工导入实盘**。
+   - `oosWindow`/`oosEvaluation`/`oosNote` = 第 2 步的样本外结果（有 validation 窗口时必传，报告将并排展示样本内/样本外对照）
+5. 生成 `candidate-report.md` 后**停止动作**，向用户汇报：SOTA variant、样本内/样本外各指标 vs 阈值、trace 轮数、报告路径，并明确提示——**确认后才可人工导入实盘**。
 
 ## 6. 红线（必须遵守）
 

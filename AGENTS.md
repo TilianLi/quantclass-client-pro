@@ -178,7 +178,7 @@ pnpm verify:mcp-tools         # 校验 MCP tool 注册（scripts/verify-mcp-tool
 
 ### 5.2 Tool 分组
 
-当前 MCP Server 共注册 **37 个 tools**（`src/mcp-server/tools.ts`），分组如下：
+当前 MCP Server 共注册 **38 个 tools**（`src/mcp-server/tools.ts`），分组如下：
 
 - **系统控制（7 个）**：
   - `get_system_status`：获取系统运行状态
@@ -196,12 +196,13 @@ pnpm verify:mcp-tools         # 校验 MCP tool 注册（scripts/verify-mcp-tool
   - `get_account_info`：账户信息
   - `get_trading_info`：Aqua 交易信息
 
-- **回测工具（8 个）**：
+- **回测工具（9 个）**：
   - `get_backtest_config`：回测配置
   - `set_backtest_config`：设置回测配置
   - `run_backtest`：执行回测（含产物校验，响应带内核版本/耗时/产物路径）
   - `run_backtest_async`：异步执行回测（返回 taskId）
   - `get_backtest_task`：查询异步回测任务状态与日志尾部
+  - `run_walkforward`：多窗口串行回测（walk-forward 稳健性检查）
   - `get_backtest_result`：回测选股结果
   - `get_backtest_performance`：回测绩效指标（含 parsed 数值字段）
   - `get_backtest_equity_curve`：回测资金曲线

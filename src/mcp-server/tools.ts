@@ -503,6 +503,89 @@ export function registerTools(server: McpServer): void {
 	)
 
 	server.tool(
+		"run_walkforward",
+		"对当前已启用策略依次在多个回测窗口执行回测（walk-forward 稳健性检查，防单窗口过拟合）。每个窗口串行执行 set_backtest_config → run_backtest → get_backtest_performance。返回各窗口绩效与汇总（最劣年化/年化中位/最差回撤/成功数）。注意：执行前需已导入并启用目标策略；每个窗口约需数分钟，全部串行执行。",
+		{
+			windows: z
+				.array(
+					z.object({
+						start_date: z.string().describe("窗口开始日期 YYYY-MM-DD"),
+						end_date: z
+							.string()
+							.nullable()
+							.optional()
+							.describe("窗口结束日期 YYYY-MM-DD，null 表示今天"),
+						initial_cash: z.number().optional().describe("初始资金"),
+					}),
+				)
+				.min(1)
+				.describe("回测窗口列表（串行逐个执行）"),
+		},
+		async ({ windows }) => {
+			const results: Array<Record<string, unknown>> = []
+			for (const w of windows) {
+				const body: Record<string, unknown> = {
+					start_date: w.start_date,
+					end_date: w.end_date ?? null,
+				}
+				if (w.initial_cash !== undefined) body.initial_cash = w.initial_cash
+				try {
+					await put("/mcp/backtest/config", body)
+					await post("/mcp/backtest/run", undefined, 1_800_000)
+					const perf = (await get("/mcp/backtest/performance")) as Record<
+						string,
+						unknown
+					>
+					const parsed = (perf?.data as Record<string, unknown>)?.parsed
+					results.push({ window: body, ok: true, metrics: parsed })
+				} catch (error) {
+					results.push({
+						window: body,
+						ok: false,
+						error: error instanceof Error ? error.message : String(error),
+					})
+				}
+			}
+
+			const okMetrics = results
+				.filter((r) => r.ok && r.metrics)
+				.map((r) => r.metrics as Record<string, number>)
+			const annuals = okMetrics
+				.map((m) => m.annual_return_pct)
+				.filter((v): v is number => typeof v === "number")
+				.sort((a, b) => a - b)
+			const drawdowns = okMetrics
+				.map((m) => m.max_drawdown_pct)
+				.filter((v): v is number => typeof v === "number")
+				.map((v) => Math.abs(v))
+			const aggregate = {
+				succeeded: okMetrics.length,
+				total: windows.length,
+				annual_min: annuals.length > 0 ? annuals[0] : undefined,
+				annual_median:
+					annuals.length > 0
+						? annuals.length % 2 === 1
+							? annuals[(annuals.length - 1) / 2]
+							: (annuals[annuals.length / 2 - 1] +
+									annuals[annuals.length / 2]) /
+								2
+						: undefined,
+				drawdown_worst:
+					drawdowns.length > 0 ? Math.max(...drawdowns) : undefined,
+			}
+
+			return {
+				content: [
+					{
+						type: "text",
+						text: JSON.stringify({ results, aggregate }, null, 2),
+					},
+				],
+			}
+		},
+	)
+
+	server.tool(
 		"get_backtest_result",
 		"查询回测选股结果，返回最新一次回测的选股明细（选股日期、股票代码、目标资金占比、预计股数等）。需先执行 run_backtest 生成结果。",
 		{},
@@ -1174,7 +1257,7 @@ export function registerTools(server: McpServer): void {
 
 	server.tool(
 		"submit_strategy_for_review",
-		"生成候选策略报告并等待人工确认",
+		"生成候选策略报告并等待人工确认。可选 oosEvaluation/oosWindow/oosNote 附带样本外验证结果，报告将并排展示样本内与样本外对照。",
 		{
 			runId: z.string().describe("Run ID"),
 			variantId: z.string().describe("Variant ID"),
@@ -1191,6 +1274,28 @@ export function registerTools(server: McpServer): void {
 			}),
 			strategyPath: z.string().describe("策略文件路径"),
 			summary: z.string().describe("策略说明摘要"),
+			oosWindow: z
+				.string()
+				.optional()
+				.describe("样本外验证窗口描述（如 2025-01-01 至今）"),
+			oosEvaluation: z
+				.object({
+					passed: z.boolean(),
+					score: z.number(),
+					details: z.record(
+						z.object({
+							value: z.number(),
+							threshold: z.number().optional(),
+							passed: z.boolean(),
+						}),
+					),
+				})
+				.optional()
+				.describe("样本外评估结果（与 evaluation 同构）"),
+			oosNote: z
+				.string()
+				.optional()
+				.describe("样本外评估结论（余量规则的文字判断）"),
 		},
 		async (params) => {
 			try {

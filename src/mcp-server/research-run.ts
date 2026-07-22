@@ -45,20 +45,21 @@ const metricsSchema = z.object({
 	profit_loss_ratio: z.number().optional(),
 })
 
+const backtestWindowSchema = z.object({
+	initial_cash: z.number().optional(),
+	start_date: z.string().optional(),
+	end_date: z.string().nullable().optional(),
+	filter_kcb: z.string().optional(),
+	filter_cyb: z.string().optional(),
+	filter_bj: z.string().optional(),
+})
+
 export const researchBriefSchema = z.object({
 	goal: z.string().min(1),
 	universe: z.string().optional(),
 	thresholds: metricsSchema,
-	backtest: z
-		.object({
-			initial_cash: z.number().optional(),
-			start_date: z.string().optional(),
-			end_date: z.string().nullable().optional(),
-			filter_kcb: z.string().optional(),
-			filter_cyb: z.string().optional(),
-			filter_bj: z.string().optional(),
-		})
-		.optional(),
+	backtest: backtestWindowSchema.optional(),
+	validation: backtestWindowSchema.optional(),
 	constraints: z.array(z.string()).optional(),
 	evolving_n: z.number().int().positive().optional(),
 })
@@ -79,6 +80,14 @@ export const experimentEntrySchema = z.object({
 	verdict: z.enum(["completed", "sota", "failed"]),
 	lesson: z.string().optional(),
 	kernelVersion: z.string().optional(),
+	complexity: z
+		.number()
+		.int()
+		.nonnegative()
+		.optional()
+		.describe(
+			"旋钮计数（factor_list+filter_list+filter_list_post+cross_sections 条目数）",
+		),
 })
 
 export type ResearchBrief = z.infer<typeof researchBriefSchema>
@@ -251,7 +260,7 @@ export function getRunSummary(runId: string): RunSummary {
 	}
 
 	// SOTA：只在有 evaluation 的实验中比较，
-	// 先比 evaluation.score，再比 annual_return_pct
+	// 先比 evaluation.score，同分比复杂度（低者优先，防过拟合），再比 annual_return_pct
 	let sotaEntry: ExperimentEntry | null = null
 	for (const e of entries) {
 		if (!e.evaluation) continue
@@ -266,6 +275,14 @@ export function getRunSummary(runId: string): RunSummary {
 			continue
 		}
 		if (scoreDiff === 0) {
+			const cNew = e.complexity
+			const cOld = sotaEntry.complexity
+			if (cNew !== undefined && cOld !== undefined && cNew !== cOld) {
+				if (cNew < cOld) {
+					sotaEntry = e
+				}
+				continue
+			}
 			const challenger =
 				e.metrics?.annual_return_pct ?? Number.NEGATIVE_INFINITY
 			const current =
