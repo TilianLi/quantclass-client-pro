@@ -920,17 +920,42 @@ export function registerTools(server: McpServer): void {
 
 	server.tool(
 		"write_factor_file",
-		"写入自定义因子文件到 variant 的 因子库/<category>/<factorName>.py（自动补 __init__.py）。写入前强制静态检查：仅允许 pandas/numpy/math 等纯计算库与 add_factor 接口，禁止 os/sys/subprocess/网络/IO/exec/eval 等。检查不通过则拒绝写入。",
+		"写入自定义因子文件。kind=factor 时写 因子库/<category>/<factorName>.py（category 必填）；kind=cross_factor 时写 截面因子库/[category/]<factorName>.py（category 可选）。自动补 __init__.py。写入前强制静态检查：时序因子仅允许 pandas/numpy/math 等纯计算库与 add_factor/fin_cols 接口；截面因子额外要求 ov_cols、放宽 core/scipy 导入。禁止 os/sys/subprocess/网络/IO/exec/eval 等。检查不通过则拒绝写入。",
 		{
 			runId: z.string().describe("Run ID"),
 			variantId: z.string().describe("Variant ID，例如 v1"),
-			category: z.string().describe("因子类目（如 动量、波动、规模）"),
+			kind: z
+				.enum(["factor", "cross_factor"])
+				.optional()
+				.default("factor")
+				.describe("因子类型：factor=时序因子，cross_factor=截面因子"),
+			category: z
+				.string()
+				.optional()
+				.describe(
+					"因子类目（如 动量、波动、规模）。kind=factor 时必填；cross_factor 时可选（缺省平铺）",
+				),
 			factorName: z.string().describe("因子名（如 动量5，不含 .py 后缀）"),
-			content: z.string().describe("因子源码（须含 fin_cols 与 add_factor）"),
+			content: z
+				.string()
+				.describe(
+					"因子源码（须含 fin_cols 与 add_factor；截面因子还须含 ov_cols）",
+				),
 		},
-		async ({ runId, variantId, category, factorName, content }) => {
+		async ({ runId, variantId, kind, category, factorName, content }) => {
 			try {
-				const check = checkFactorSource(content)
+				if (kind === "factor" && !category) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: "写入因子失败: kind=factor 时 category 必填（类目，如 动量）",
+							},
+						],
+						isError: true,
+					}
+				}
+				const check = checkFactorSource(content, kind)
 				if (!check.ok) {
 					return {
 						content: [
@@ -957,6 +982,7 @@ export function registerTools(server: McpServer): void {
 					category,
 					factorName,
 					content,
+					kind,
 				)
 				return {
 					content: [

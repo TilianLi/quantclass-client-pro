@@ -31,6 +31,9 @@ ALLOWED_IMPORTS = {
     "abc", "numbers",
 }
 
+# 截面因子额外允许：core（内核自身库）与 scipy（科学计算）
+CROSS_EXTRA_IMPORTS = {"core", "scipy"}
+
 FORBIDDEN_CALLS = {
     "open", "exec", "eval", "__import__", "compile", "input",
     "breakpoint", "exit", "quit", "globals", "locals", "vars",
@@ -42,17 +45,29 @@ FORBIDDEN_ATTRS = {
     "__getattribute__", "__dict__", "__class__",
 }
 
-# 数据中心常见行情列（仅用于提示，非强制）
+# 数据中心常见行情/ID 列（仅用于提示，非强制）
 COMMON_COLUMNS = {
     "开盘价", "收盘价", "最高价", "最低价", "成交额", "成交量",
     "前收盘价", "复权因子", "开盘价_复权", "收盘价_复权",
     "最高价_复权", "最低价_复权", "涨跌幅", "换手率", "总市值", "流通市值",
+    "交易日期", "股票代码",
 }
 
 
-def check(path):
+def check(path, kind="factor"):
     errors = []
     warnings = []
+
+    if kind not in ("factor", "cross_factor"):
+        return {
+            "ok": False,
+            "errors": [f"未知因子类型: {kind}（支持 factor / cross_factor）"],
+            "warnings": [],
+            "interface": {},
+        }
+    allowed_imports = ALLOWED_IMPORTS | (
+        CROSS_EXTRA_IMPORTS if kind == "cross_factor" else set()
+    )
 
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -67,17 +82,19 @@ def check(path):
 
     has_add_factor = False
     fin_cols = None
+    ov_cols = None
     referenced = set()
+    assigned = set()
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for a in node.names:
                 root = a.name.split(".")[0]
-                if root not in ALLOWED_IMPORTS:
+                if root not in allowed_imports:
                     errors.append(f"禁止的 import: {a.name}（仅允许纯计算库）")
         elif isinstance(node, ast.ImportFrom):
             root = (node.module or "").split(".")[0]
-            if root not in ALLOWED_IMPORTS:
+            if root not in allowed_imports:
                 errors.append(f"禁止的 from import: {node.module}（仅允许纯计算库）")
         elif isinstance(node, ast.Call):
             func = node.func
@@ -92,15 +109,29 @@ def check(path):
                 errors.append("add_factor 签名缺少 df 参数")
         elif isinstance(node, ast.Assign):
             for t in node.targets:
-                if isinstance(t, ast.Name) and t.id == "fin_cols":
+                if isinstance(t, ast.Name) and t.id in ("fin_cols", "ov_cols"):
+                    target = t.id
                     if isinstance(node.value, (ast.List, ast.Tuple)):
-                        fin_cols = [
+                        value = [
                             elt.value
                             for elt in node.value.elts
                             if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
                         ]
+                        if target == "fin_cols":
+                            fin_cols = value
+                        else:
+                            ov_cols = value
                     else:
-                        warnings.append("fin_cols 应为字符串列表字面量")
+                        warnings.append(f"{target} 应为字符串列表字面量")
+                # 记录 df['临时列'] = ... 的本地赋值（后续读取不再告警）
+                elif (
+                    isinstance(t, ast.Subscript)
+                    and isinstance(t.value, ast.Name)
+                    and t.value.id == "df"
+                    and isinstance(t.slice, ast.Constant)
+                    and isinstance(t.slice.value, str)
+                ):
+                    assigned.add(t.slice.value)
         elif isinstance(node, ast.Subscript):
             # 收集 df['列名'] 引用（仅基名为 df 的约定数据帧）
             v, s = node.value, node.slice
@@ -116,8 +147,10 @@ def check(path):
         errors.append("缺少 add_factor(df, param=None, **kwargs) 函数")
     if fin_cols is None:
         errors.append("缺少模块级 fin_cols 列表（无财务列需求时写 fin_cols = []）")
+    if kind == "cross_factor" and ov_cols is None:
+        errors.append("截面因子缺少模块级 ov_cols 列表（无额外数据列需求时写 ov_cols = []）")
 
-    for col in sorted(referenced):
+    for col in sorted(referenced - assigned):
         if col not in COMMON_COLUMNS:
             warnings.append(f"引用非常见数据列: '{col}'（请确认数据中心存在该列或在 fin_cols 声明）")
 
@@ -126,8 +159,10 @@ def check(path):
         "errors": errors,
         "warnings": warnings,
         "interface": {
+            "kind": kind,
             "add_factor": has_add_factor,
             "fin_cols": fin_cols,
+            "ov_cols": ov_cols,
             "referenced_columns": sorted(referenced),
         },
     }
@@ -136,4 +171,5 @@ def check(path):
 if __name__ == "__main__":
     # ensure_ascii=True：输出纯 ASCII（\uXXXX 转义），
     # 避免 Windows GBK 控制台下 Node 端按 utf-8 解码出现乱码
-    print(json.dumps(check(sys.argv[1]), ensure_ascii=True))
+    kind = sys.argv[2] if len(sys.argv) > 2 else "factor"
+    print(json.dumps(check(sys.argv[1], kind), ensure_ascii=True))

@@ -215,7 +215,7 @@ pnpm verify:mcp-tools         # 校验 MCP tool 注册（scripts/verify-mcp-tool
   - `list_strategies`：列出策略 run/variant
   - `read_strategy_file`：读取策略文件
   - `write_strategy_file`：写入策略文件
-  - `write_factor_file`：写入自定义因子（AST 白名单静态检查后落盘，自动补 __init__.py）
+  - `write_factor_file`：写入自定义因子（时序/截面，AST 白名单静态检查后落盘，自动补 __init__.py）
   - `validate_strategy`：校验 config.py
   - `evaluate_backtest`：评估多次回测结果
   - `compare_backtest_variants`：按阈值对比多个 variant 绩效并返回最优

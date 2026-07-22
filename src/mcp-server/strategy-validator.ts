@@ -78,7 +78,7 @@ function getFactorName(factor: unknown[]): string {
 }
 
 /**
- * 收集 strategy_list 中引用的所有因子名称
+ * 收集 strategy_list 中引用的所有因子名称（含截面因子及其输入因子）
  */
 function collectFactorNames(strategyList: unknown[]): Set<string> {
 	const names = new Set<string>()
@@ -94,6 +94,26 @@ function collectFactorNames(strategyList: unknown[]): Set<string> {
 				// filter_list 元素可能是 [name, param, condition, post?]
 				const name = getFactorName(item)
 				if (name) names.add(name)
+			}
+		}
+
+		// 截面因子：cross_sections 的 name 为截面因子文件，
+		// 其 factor_list 为输入时序因子
+		const crossSections = s.cross_sections
+		if (Array.isArray(crossSections)) {
+			for (const cs of crossSections) {
+				if (typeof cs !== "object" || cs === null) continue
+				const c = cs as Record<string, unknown>
+				if (typeof c.name === "string" && c.name) names.add(c.name)
+				const inputs = c.factor_list
+				if (Array.isArray(inputs)) {
+					for (const f of inputs) {
+						if (Array.isArray(f)) {
+							const name = getFactorName(f)
+							if (name) names.add(name)
+						}
+					}
+				}
 			}
 		}
 
@@ -174,23 +194,22 @@ function validateFactorLibrary(configDir: string): string[] {
 }
 
 /**
- * 校验策略目录下因子库中每个因子源码（语法 + AST 白名单 + 接口）。
+ * 校验策略目录下因子库与截面因子库中每个因子源码
+ * （语法 + AST 白名单 + 接口，截面因子额外要求 ov_cols）。
  * 与 write_factor_file 使用同一套静态检查，防止绕过工具手工放置的因子。
  */
 function validateFactorContents(configDir: string): string[] {
 	const errors: string[] = []
-	const factorLibDir = join(configDir, "因子库")
-	if (!existsSync(factorLibDir)) return errors
 
-	function walk(dir: string) {
+	function walk(dir: string, kind: "factor" | "cross_factor") {
 		for (const entry of readdirSync(dir)) {
 			const fullPath = join(dir, entry)
 			const stat = statSync(fullPath)
 			if (stat.isDirectory()) {
-				walk(fullPath)
+				walk(fullPath, kind)
 			} else if (entry.endsWith(".py") && entry !== "__init__.py") {
 				const rel = fullPath.replace(`${configDir}/`, "")
-				const check = checkFactorSource(readFileSync(fullPath, "utf-8"))
+				const check = checkFactorSource(readFileSync(fullPath, "utf-8"), kind)
 				if (!check.ok) {
 					for (const e of check.errors) {
 						errors.push(`${rel}: ${e}`)
@@ -199,12 +218,23 @@ function validateFactorContents(configDir: string): string[] {
 			}
 		}
 	}
-	walk(factorLibDir)
+
+	for (const [libDir, kind] of [
+		["因子库", "factor"],
+		["截面因子库", "cross_factor"],
+	] as const) {
+		const libPath = join(configDir, libDir)
+		if (existsSync(libPath)) {
+			walk(libPath, kind)
+		}
+	}
 	return errors
 }
 
 /**
- * 解析因子名称对应的候选文件路径
+ * 解析因子名称对应的候选文件路径。
+ * 与内核 factor_hub 一致：按 因子库 → 截面因子库 顺序在
+ * variant 本地与 real_trading 两侧查找。
  */
 function resolveFactorPaths(
 	name: string,
@@ -215,10 +245,12 @@ function resolveFactorPaths(
 	const fileName = `${parts[parts.length - 1]}.py`
 	const subDirs = parts.slice(0, -1)
 
-	const localDir = join(configDir, "因子库", ...subDirs)
-	const rtDir = join(realTradingDir, "因子库", ...subDirs)
-
-	return [join(localDir, fileName), join(rtDir, fileName)]
+	return [
+		join(configDir, "因子库", ...subDirs, fileName),
+		join(realTradingDir, "因子库", ...subDirs, fileName),
+		join(configDir, "截面因子库", ...subDirs, fileName),
+		join(realTradingDir, "截面因子库", ...subDirs, fileName),
+	]
 }
 
 /**

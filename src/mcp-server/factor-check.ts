@@ -18,11 +18,15 @@ export interface FactorCheckResult {
 	errors: string[]
 	warnings: string[]
 	interface: {
+		kind?: string
 		add_factor?: boolean
 		fin_cols?: string[] | null
+		ov_cols?: string[] | null
 		referenced_columns?: string[]
 	}
 }
+
+export type FactorKind = "factor" | "cross_factor"
 
 function resolvePythonCmd(): string {
 	const candidates = [
@@ -38,14 +42,19 @@ function resolvePythonCmd(): string {
 /**
  * 对因子源码做静态检查（语法 + AST 白名单 + 接口提取）。
  * 通过 resources/check_factor.py（stdlib）在内嵌或系统 Python 上执行。
+ * kind=factor 为时序因子（因子库），kind=cross_factor 为截面因子
+ * （截面因子库；额外要求 ov_cols，并放宽 core/scipy 导入）。
  */
-export function checkFactorSource(source: string): FactorCheckResult {
+export function checkFactorSource(
+	source: string,
+	kind: FactorKind = "factor",
+): FactorCheckResult {
 	const tmpDir = mkdtempSync(join(tmpdir(), "qc-factor-"))
 	const tmpFile = join(tmpDir, "factor.py")
 	try {
 		writeFileSync(tmpFile, source, "utf-8")
 		const script = join(process.cwd(), "resources", "check_factor.py")
-		const output = execFileSync(resolvePythonCmd(), [script, tmpFile], {
+		const output = execFileSync(resolvePythonCmd(), [script, tmpFile, kind], {
 			encoding: "utf-8",
 			timeout: 10000,
 		})

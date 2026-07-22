@@ -82,3 +82,58 @@ describe("factor-check", () => {
 		assert.ok(r.errors.some((e) => e.includes("语法错误")))
 	})
 })
+
+const GOOD_CROSS_FACTOR = `import pandas as pd
+import numpy as np
+from scipy.special import erfinv
+import core.market_essentials as me
+
+fin_cols = []
+ov_cols = []
+
+def add_factor(df: pd.DataFrame, param=None, **kwargs) -> pd.DataFrame:
+    col_name = kwargs["col_name"]
+    section_factor = kwargs["section_factor"]
+    y_col = section_factor.factor_list[0].col_name
+    x_col = section_factor.factor_list[1].col_name
+    df["_y"] = df.groupby("交易日期")[y_col].rank(pct=True)
+    df["_x"] = df.groupby("交易日期")[x_col].rank(pct=True)
+    df[col_name] = df["_y"] - df["_x"]
+    return df[["交易日期", "股票代码", col_name]]
+`
+
+describe("factor-check cross_factor", () => {
+	it("accepts a well-formed cross factor (core/scipy allowed)", () => {
+		const r = checkFactorSource(GOOD_CROSS_FACTOR, "cross_factor")
+		assert.strictEqual(r.ok, true)
+		assert.deepStrictEqual(r.errors, [])
+		assert.strictEqual(r.interface.kind, "cross_factor")
+		assert.deepStrictEqual(r.interface.ov_cols, [])
+	})
+
+	it("rejects cross factor missing ov_cols", () => {
+		const src = GOOD_CROSS_FACTOR.replace("ov_cols = []\n", "")
+		const r = checkFactorSource(src, "cross_factor")
+		assert.strictEqual(r.ok, false)
+		assert.ok(r.errors.some((e) => e.includes("ov_cols")))
+	})
+
+	it("still rejects dangerous imports in cross factor", () => {
+		const src = `import os\n${GOOD_CROSS_FACTOR}`
+		const r = checkFactorSource(src, "cross_factor")
+		assert.strictEqual(r.ok, false)
+		assert.ok(r.errors.some((e) => e.includes("禁止的 import: os")))
+	})
+
+	it("rejects core/scipy imports for plain factor kind", () => {
+		const r = checkFactorSource(GOOD_CROSS_FACTOR, "factor")
+		assert.strictEqual(r.ok, false)
+		assert.ok(r.errors.some((e) => e.includes("禁止")))
+	})
+
+	it("rejects unknown kind", () => {
+		const r = checkFactorSource(GOOD_FACTOR, "signal" as never)
+		assert.strictEqual(r.ok, false)
+		assert.ok(r.errors.some((e) => e.includes("未知因子类型")))
+	})
+})

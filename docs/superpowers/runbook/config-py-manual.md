@@ -99,7 +99,7 @@ zeus 2.2 成交价用 `["t_wap", 时间, 拆单间隔, 拆单金额, 1.005]` 模
 - `类目.名`（如 `动量.动量20`）→ `因子库/类目/名.py`；裸名（如 `市值`）→ `因子库/名.py` 或内核内置因子
 - 解析顺序：`因子库` 优先于 `截面因子库`，同名先命中先用
 - **子目录必须含 `__init__.py`**（内核按 Python 模块 import，缺则 ModuleNotFoundError 全崩）
-- **自定义因子走 `write_factor_file` 闸门**（受限开放）：写入前强制 AST 静态检查（仅纯计算库 + `fin_cols`/`add_factor` 契约，禁 IO/网络/exec 等），自动补 `__init__.py`；绕过工具手工放置的因子会被 `validate_strategy` 用同一套检查拦截。因子契约：
+- **自定义因子走 `write_factor_file` 闸门**（受限开放）：写入前强制 AST 静态检查（仅纯计算库 + `fin_cols`/`add_factor` 契约，禁 IO/网络/exec 等），自动补 `__init__.py`；绕过工具手工放置的因子会被 `validate_strategy` 用同一套检查拦截。时序因子契约：
 
 ```python
 import pandas as pd
@@ -110,6 +110,43 @@ def add_factor(df: pd.DataFrame, param=None, **kwargs) -> pd.DataFrame:
     col_name = kwargs['col_name']
     df[col_name] = df['收盘价'].pct_change(20)  # 你的计算
     return df[[col_name]]
+```
+
+- **截面因子**（`kind="cross_factor"`，写入 `截面因子库/`）：二阶因子——基于其他因子列做当日截面运算。契约额外要求 `ov_cols`，通过 `kwargs['section_factor']` 取输入因子列，返回保留 ID 列的 DataFrame；允许导入 `core`（内核库）与 `scipy`：
+
+```python
+import pandas as pd
+
+fin_cols = []
+ov_cols = []
+
+def add_factor(df: pd.DataFrame, param=None, **kwargs) -> pd.DataFrame:
+    col_name = kwargs["col_name"]
+    sf = kwargs["section_factor"]          # CrossSectionConfig
+    y_col = sf.factor_list[0].col_name     # 第 1 个输入因子列
+    x_col = sf.factor_list[1].col_name     # 第 2 个输入因子列
+    df["_y"] = df.groupby("交易日期")[y_col].rank(pct=True)
+    df["_x"] = df.groupby("交易日期")[x_col].rank(pct=True)
+    df[col_name] = df["_y"] - df["_x"]     # 例：两因子截面排名差
+    return df[["交易日期", "股票代码", col_name]]
+```
+
+config.py 中通过策略的 `cross_sections` 字段引用截面因子（`factor_list` 声明输入时序因子，`method` 为可选过滤条件——带 method 的截面因子会并入前置过滤）：
+
+```python
+"cross_sections": [
+    {
+        "name": "截面排名差",                    # 截面因子文件名（不含 .py）
+        "factor_list": [                         # 输入的时序因子（同策略 factor_list 格式）
+            ["波动.波动率20", True, 20, 1],
+            ["规模.成交额Mean", True, 5, 1],
+        ],
+        "is_sort_asc": True,
+        "params": None,
+        "args": 1,                               # 权重（默认 1，归一化）
+        "method": "pct:<=0.5",                   # 可选：作为前置过滤条件
+    },
+]
 ```
 
 - 也可用因子（无需自己写）：

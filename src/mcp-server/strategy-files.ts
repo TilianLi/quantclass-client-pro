@@ -123,33 +123,38 @@ export function listStrategyFiles(runId: string, variantId: string): string[] {
 }
 
 /**
- * 写入自定义因子文件到 variant 的 因子库/<category>/<factorName>.py，
- * 并自动补齐内核按模块导入所需的 __init__.py（因子库根目录与类目目录）。
- * 返回写入的文件路径。
+ * 写入自定义因子文件到 variant 的因子库目录。
+ * kind=factor → 因子库/<category>/<factorName>.py（category 必填）；
+ * kind=cross_factor → 截面因子库/[category/]<factorName>.py（category 可选，缺省平铺）。
+ * 自动补齐内核按模块导入所需的 __init__.py。返回写入的文件路径。
  */
 export function writeFactorFile(
 	runId: string,
 	variantId: string,
-	category: string,
+	category: string | undefined,
 	factorName: string,
 	content: string,
+	kind: "factor" | "cross_factor" = "factor",
 ): string {
 	assertSafePathComponent(runId, "runId")
 	assertSafePathComponent(variantId, "variantId")
-	assertSafePathComponent(category, "category")
 	assertSafePathComponent(factorName, "factorName")
-	const factorLibRoot = assertInsideWorkspace(
-		join(WORKSPACE_ROOT, runId, variantId, "因子库"),
+	const libDirName = kind === "cross_factor" ? "截面因子库" : "因子库"
+	const libRoot = assertInsideWorkspace(
+		join(WORKSPACE_ROOT, runId, variantId, libDirName),
 	)
-	const dir = assertInsideWorkspace(join(factorLibRoot, category))
+	let dir = libRoot
+	if (category !== undefined) {
+		assertSafePathComponent(category, "category")
+		dir = assertInsideWorkspace(join(libRoot, category))
+	} else if (kind === "factor") {
+		throw new Error("时序因子必须提供 category（类目，如 动量）")
+	}
 	if (!existsSync(dir)) {
 		mkdirSync(dir, { recursive: true })
 	}
 	// 内核以 Python 模块方式导入因子，目录必须含 __init__.py
-	for (const p of [
-		join(factorLibRoot, "__init__.py"),
-		join(dir, "__init__.py"),
-	]) {
+	for (const p of [join(libRoot, "__init__.py"), join(dir, "__init__.py")]) {
 		if (!existsSync(p)) {
 			writeFileSync(p, "", "utf-8")
 		}
