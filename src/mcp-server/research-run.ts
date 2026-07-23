@@ -110,6 +110,22 @@ function parseWith<T>(schema: ZodType<T>, data: unknown, label: string): T {
 	return result.data
 }
 
+/**
+ * 本地时间 ISO 格式（带时区偏移），如 2026-07-23T02:36:24+08:00。
+ * trace/brief 需要人工阅读，避免 UTC Zulu 时间造成的时区换算负担。
+ */
+function localTimestamp(d = new Date()): string {
+	const pad = (n: number) => String(n).padStart(2, "0")
+	const offsetMin = -d.getTimezoneOffset()
+	const sign = offsetMin >= 0 ? "+" : "-"
+	const abs = Math.abs(offsetMin)
+	return (
+		`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+		`T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}` +
+		`${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`
+	)
+}
+
 function runDir(runId: string): string {
 	assertSafePathComponent(runId, "runId")
 	return assertInsideWorkspace(join(getWorkspaceRoot(), runId))
@@ -211,7 +227,7 @@ export function recordExperiment(
 	const parsed = parseWith(experimentEntrySchema, entry, "entry")
 	const full: ExperimentEntry = {
 		...parsed,
-		ts: parsed.ts ?? new Date().toISOString(),
+		ts: parsed.ts ?? localTimestamp(),
 	}
 	const path = tracePath(runId)
 	appendFileSync(path, `${JSON.stringify(full)}\n`, "utf-8")

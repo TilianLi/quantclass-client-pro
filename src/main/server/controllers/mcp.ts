@@ -337,6 +337,35 @@ mcpRouter.get("/backtest/config", (c: Context) => {
 })
 
 /**
+ * 校验本次回测已产出 策略评价.csv（存在且 mtime 不早于 startedAtMs）。
+ * 内核异常（如因子缺失）也会以 exit 0 退出，仅凭进程退出码无法识别失败，
+ * 同步与异步回测路径共用此校验。
+ */
+async function findBacktestArtifact(
+	libraryType: string,
+	startedAtMs: number,
+): Promise<{ backtestName: string; csvPath: string; fresh: boolean }> {
+	const configKey =
+		libraryType === "pos"
+			? POS_MGMT_STRATEGY_CONFIG
+			: SELECT_STOCK_STRATEGY_CONFIG
+	const backtestName = store.get(
+		`${configKey}.backtest_name`,
+		"策略库",
+	) as string
+	const csvPath = await storeApi.getAllDataPath([
+		"real_trading",
+		"data",
+		"回测结果",
+		backtestName,
+		"策略评价.csv",
+	])
+	const fresh =
+		fs.existsSync(csvPath) && fs.statSync(csvPath).mtimeMs >= startedAtMs
+	return { backtestName, csvPath, fresh }
+}
+
+/**
  * POST /mcp/backtest/run - 执行策略回测
  *
  * 根据 libraryType 选择内核：选股→aqua，仓位管理→zeus。
@@ -360,24 +389,8 @@ mcpRouter.post("/backtest/run", async (c: Context) => {
 		)
 	}
 
-	// 内核异常（如因子缺失）也会以 exit 0 退出，仅凭进程退出码无法识别失败，
-	// 必须校验本次回测已产出 策略评价.csv（存在且为本次运行所写）。
-	const configKey =
-		libraryType === "pos"
-			? POS_MGMT_STRATEGY_CONFIG
-			: SELECT_STOCK_STRATEGY_CONFIG
-	const backtestName = store.get(
-		`${configKey}.backtest_name`,
-		"策略库",
-	) as string
-	const csvPath = await storeApi.getAllDataPath([
-		"real_trading",
-		"data",
-		"回测结果",
-		backtestName,
-		"策略评价.csv",
-	])
-	if (!fs.existsSync(csvPath) || fs.statSync(csvPath).mtimeMs < startedAt) {
+	const artifact = await findBacktestArtifact(libraryType, startedAt)
+	if (!artifact.fresh) {
 		return c.json(
 			{
 				code: 500,
@@ -392,10 +405,10 @@ mcpRouter.post("/backtest/run", async (c: Context) => {
 		data: {
 			kernel,
 			libraryType,
-			backtestName,
+			backtestName: artifact.backtestName,
 			kernelVersion: await readKernelVersionTag(kernel),
 			durationMs: Date.now() - startedAt,
-			resultPath: csvPath,
+			resultPath: artifact.csvPath,
 		},
 		message: "策略回测已完成",
 	})
@@ -405,8 +418,7 @@ mcpRouter.post("/backtest/run", async (c: Context) => {
  * POST /mcp/backtest/run-async - 异步执行策略回测
  *
  * 立即返回 taskId，内核在后台运行；用 GET /mcp/backtest/task 轮询状态。
- * 注意：异步模式不做产物校验，完成与否以任务 status 为准，
- * 绩效读取仍以 get_backtest_performance 的新鲜度为准。
+ * 产物校验在 GET /mcp/backtest/task 侧完成（status=success 时校验本次产物）。
  */
 mcpRouter.post("/backtest/run-async", async (c: Context) => {
 	const libraryType = store.get(LIBRARY_TYPE, "select") as string
@@ -445,6 +457,8 @@ mcpRouter.post("/backtest/run-async", async (c: Context) => {
  *
  * Query: taskId（run-async 返回的 taskId）
  * 返回 status(running/success/error)、exitCode、stdout/stderr 尾部日志。
+ * status=success 时校验本次回测产物（策略评价.csv 存在且为本次运行所写），
+ * 未产出则降级为 status=error 并附 artifactError（与同步路径同一校验）。
  */
 mcpRouter.get("/backtest/task", async (c: Context) => {
 	const taskId = c.req.query("taskId")
@@ -458,22 +472,33 @@ mcpRouter.get("/backtest/task", async (c: Context) => {
 			404,
 		)
 	}
-	return c.json({
-		code: 0,
-		data: {
-			taskId: task.taskId,
-			pid: task.pid,
-			kernel: task.kernel,
-			action: task.action,
-			status: task.status,
-			exitCode: task.exitCode,
-			stdoutTail: task.stdoutTail,
-			stderrTail: task.stderrTail,
-			startedAt: task.startedAt,
-			finishedAt: task.finishedAt,
-		},
-		message: "ok",
-	})
+
+	const data: Record<string, unknown> = {
+		taskId: task.taskId,
+		pid: task.pid,
+		kernel: task.kernel,
+		action: task.action,
+		status: task.status,
+		exitCode: task.exitCode,
+		stdoutTail: task.stdoutTail,
+		stderrTail: task.stderrTail,
+		startedAt: task.startedAt,
+		finishedAt: task.finishedAt,
+		kernelVersion: await readKernelVersionTag(task.kernel),
+	}
+
+	if (task.status === "success") {
+		const libraryType = store.get(LIBRARY_TYPE, "select") as string
+		// task.startedAt 为 dayjs 本地格式 "YYYY-MM-DD HH:mm:ss"
+		const startedAtMs = Date.parse(task.startedAt.replace(" ", "T"))
+		const artifact = await findBacktestArtifact(libraryType, startedAtMs)
+		if (!artifact.fresh) {
+			data.status = "error"
+			data.artifactError = `回测未产出结果：内核可能执行失败（未见本次运行生成的 策略评价.csv），请检查 real_trading/logs/${task.kernel}.log 中的错误详情`
+		}
+	}
+
+	return c.json({ code: 0, data, message: "ok" })
 })
 
 /**
@@ -1231,8 +1256,13 @@ mcpRouter.put("/backtest/config", async (c: Context) => {
 
 	for (const [key, value] of Object.entries(body)) {
 		if (key in allowedKeys) {
-			store.set(allowedKeys[key], value)
-			updated[key] = value
+			// 板块过滤字段与 UI 写入口径保持一致：落盘为布尔值。
+			// zeus（Python）按真值判断，非空字符串 "0" 为真，会被误当作「过滤」。
+			const stored = key.startsWith("filter_")
+				? value === "1" || value === true
+				: value
+			store.set(allowedKeys[key], stored)
+			updated[key] = stored
 		} else {
 			rejected.push(key)
 		}

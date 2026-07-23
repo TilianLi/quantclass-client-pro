@@ -452,7 +452,7 @@ export function registerTools(server: McpServer): void {
 
 	server.tool(
 		"run_backtest_async",
-		"异步执行策略回测：立即返回 taskId，内核在后台运行，用 get_backtest_task 轮询状态。适合长耗时回测时避免阻塞等待。注意：异步模式不做产物校验，绩效读取以 get_backtest_performance 为准。",
+		"异步执行策略回测：立即返回 taskId，内核在后台运行，用 get_backtest_task 轮询状态。适合长耗时回测时避免阻塞等待。产物校验在 get_backtest_task 侧完成（status=success 时校验本次产物，未产出则降级为 error 并附 artifactError）。",
 		{},
 		async () => {
 			try {
@@ -476,7 +476,7 @@ export function registerTools(server: McpServer): void {
 
 	server.tool(
 		"get_backtest_task",
-		"查询异步回测任务状态（run_backtest_async 返回的 taskId）。返回 status(running/success/error)、exitCode、stdout/stderr 尾部日志。",
+		"查询异步回测任务状态（run_backtest_async 返回的 taskId）。返回 status(running/success/error)、exitCode、stdout/stderr 尾部日志与 kernelVersion。status=success 时校验本次回测产物（策略评价.csv 存在且为本次运行所写），未产出则 status 降级为 error 并附 artifactError。",
 		{
 			taskId: z.string().describe("任务 ID（形如 zeus_12345）"),
 		},
@@ -485,6 +485,18 @@ export function registerTools(server: McpServer): void {
 				const result = await get(
 					`/mcp/backtest/task?taskId=${encodeURIComponent(taskId)}`,
 				)
+				// 异步回测同样缓存最近一次成功信息，供 record_experiment 的
+				// fromLatestBacktest 自动填充 kernelVersion
+				const data = (result as Record<string, unknown>)?.data as
+					| Record<string, unknown>
+					| undefined
+				if (data && data.status === "success") {
+					lastBacktestInfo = {
+						at: new Date().toISOString(),
+						kernel: data.kernel as string | undefined,
+						kernelVersion: data.kernelVersion as string | undefined,
+					}
+				}
 				return {
 					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
 				}
@@ -810,7 +822,7 @@ export function registerTools(server: McpServer): void {
 
 	server.tool(
 		"get_backtest_performance",
-		"查询回测绩效指标，读取策略评价.csv。返回累积净值、年化收益、最大回撤、胜率、盈亏收益比等 18 项绩效指标。AI Agent 可据此判断策略好坏。需先执行 run_backtest 生成结果。",
+		"查询回测绩效指标，读取策略评价.csv。返回累积净值、年化收益、最大回撤、胜率、盈亏收益比等 18 项绩效指标。AI Agent 可据此判断策略好坏。需先执行 run_backtest 生成结果。注意：data.parsed.sharpe_ratio 实为「年化收益/回撤比」（Calmar 类口径），策略评价 18 项中并无真夏普率。",
 		{},
 		async () => {
 			try {
@@ -1126,7 +1138,7 @@ export function registerTools(server: McpServer): void {
 
 	server.tool(
 		"evaluate_backtest",
-		"根据阈值评估多次回测结果，返回最优 variant",
+		"根据阈值评估多次回测结果，返回最优 variant。注意：sharpe_ratio 字段实为「年化收益/回撤比」口径（见 get_backtest_performance 说明）。",
 		{
 			performances: z.array(
 				z.object({
@@ -1168,7 +1180,7 @@ export function registerTools(server: McpServer): void {
 
 	server.tool(
 		"compare_backtest_variants",
-		"读取多个 variant 的策略评价 CSV，按阈值对比并返回最优 variant。",
+		"读取多个 variant 的策略评价 CSV，按阈值对比并返回最优 variant。返回 performances/evaluation/errors/validationWarnings（config 校验未通过时对外可见）。sharpe_ratio 字段实为「年化收益/回撤比」口径。",
 		{
 			runId: z.string().describe("Run ID，例如 run-momentum-002"),
 			variantIds: z
@@ -1197,6 +1209,7 @@ export function registerTools(server: McpServer): void {
 				const workspaceRoot = getWorkspaceRoot()
 				const performances: BacktestPerformance[] = []
 				const errors: string[] = []
+				const validationWarnings: string[] = []
 
 				for (const variantId of variantIds) {
 					const configPath = join(workspaceRoot, runId, variantId, "config.py")
@@ -1208,6 +1221,13 @@ export function registerTools(server: McpServer): void {
 					const backtestName =
 						(validation.extracted?.backtest_name as string) ||
 						`${runId}_${variantId}`
+					if (!validation.valid) {
+						// 校验失败不阻断对比，但必须对外可见（此前静默吞掉，
+						// 配置真出错时会产出错误的对比结论）
+						validationWarnings.push(
+							`${variantId}（backtest_name 取 ${backtestName}）: ${validation.errors.join("；")}`,
+						)
+					}
 					const csvPath = join(
 						dataRoot,
 						"real_trading",
@@ -1234,6 +1254,10 @@ export function registerTools(server: McpServer): void {
 									performances,
 									evaluation,
 									errors: errors.length > 0 ? errors : undefined,
+									validationWarnings:
+										validationWarnings.length > 0
+											? validationWarnings
+											: undefined,
 								},
 								null,
 								2,

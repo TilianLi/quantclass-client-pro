@@ -37,13 +37,13 @@ export interface EvaluationResult {
 
 /**
  * 解析策略评价 CSV，返回 key-value 映射。
- * CSV 格式：第一行为表头，第一列为指标名，第二列为数值（可能带 %）。
+ * CSV 格式：无表头，每行 "指标名,值"（值可能带 %、千分位或 "a / b" 双值）。
  */
 export function parsePerformanceCsv(csvText: string): Record<string, string> {
 	const lines = csvText.split(/\r?\n/).filter((line) => line.trim())
 	const result: Record<string, string> = {}
-	for (let i = 1; i < lines.length; i++) {
-		const parts = lines[i].split(",")
+	for (const line of lines) {
+		const parts = line.split(",")
 		if (parts.length >= 2) {
 			const key = parts[0].trim()
 			const value = parts[1].trim()
@@ -54,15 +54,13 @@ export function parsePerformanceCsv(csvText: string): Record<string, string> {
 }
 
 /**
- * 将百分比字符串或数字字符串转为数字。
+ * 从绩效字符串中提取首个数值。
+ * 兼容 "14.97%"、"57.95% / 57.95%"（双值取首个）、"1,234.5"（千分位）形态。
  */
 function parsePercentOrNumber(value: string | undefined): number | undefined {
 	if (value === undefined) return undefined
-	const cleaned = value.replace(/,/g, "").trim()
-	const match = cleaned.match(/^(-?\d+(?:\.\d+)?)\s*%?$/)
-	if (!match) return undefined
-	const num = Number.parseFloat(match[1])
-	return cleaned.endsWith("%") ? num : num
+	const match = value.replace(/,/g, "").match(/-?\d+(?:\.\d+)?/)
+	return match ? Number.parseFloat(match[0]) : undefined
 }
 
 export function performanceCsvToMetrics(

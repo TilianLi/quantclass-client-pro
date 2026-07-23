@@ -9,9 +9,10 @@
  */
 
 import { execFileSync } from "node:child_process"
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { pythonErrorHint, resolvePythonCmd, resourceScript } from "./paths.ts"
 
 export interface FactorCheckResult {
 	ok: boolean
@@ -28,17 +29,6 @@ export interface FactorCheckResult {
 
 export type FactorKind = "factor" | "cross_factor"
 
-function resolvePythonCmd(): string {
-	const candidates = [
-		join(process.cwd(), "resources", "python", "python.exe"),
-		join(process.cwd(), "resources", "python", "x64", "python.exe"),
-	]
-	for (const p of candidates) {
-		if (existsSync(p)) return p
-	}
-	return process.platform === "win32" ? "python" : "python3"
-}
-
 /**
  * 对因子源码做静态检查（语法 + AST 白名单 + 接口提取）。
  * 通过 resources/check_factor.py（stdlib）在内嵌或系统 Python 上执行。
@@ -53,17 +43,19 @@ export function checkFactorSource(
 	const tmpFile = join(tmpDir, "factor.py")
 	try {
 		writeFileSync(tmpFile, source, "utf-8")
-		const script = join(process.cwd(), "resources", "check_factor.py")
-		const output = execFileSync(resolvePythonCmd(), [script, tmpFile, kind], {
+		const python = resolvePythonCmd()
+		const script = resourceScript("check_factor.py")
+		const output = execFileSync(python.cmd, [script, tmpFile, kind], {
 			encoding: "utf-8",
 			timeout: 10000,
 		})
 		return JSON.parse(output) as FactorCheckResult
 	} catch (error) {
+		const msg = error instanceof Error ? error.message : String(error)
 		return {
 			ok: false,
 			errors: [
-				`因子检查执行失败: ${error instanceof Error ? error.message : String(error)}`,
+				`因子检查执行失败: ${msg}${pythonErrorHint(resolvePythonCmd(), msg)}`,
 			],
 			warnings: [],
 			interface: {},

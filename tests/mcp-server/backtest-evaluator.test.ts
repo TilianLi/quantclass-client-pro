@@ -10,7 +10,11 @@
 
 import assert from "node:assert"
 import { describe, it } from "node:test"
-import { evaluateBacktest } from "../../src/mcp-server/backtest-evaluator.ts"
+import {
+	evaluateBacktest,
+	parsePerformanceCsv,
+	performanceCsvToMetrics,
+} from "../../src/mcp-server/backtest-evaluator.ts"
 
 describe("backtest-evaluator", () => {
 	it("returns passed when thresholds met", () => {
@@ -54,5 +58,24 @@ describe("backtest-evaluator", () => {
 		const result = evaluateBacktest([], {})
 		assert.strictEqual(result.passed, false)
 		assert.strictEqual(result.bestVariantId, null)
+	})
+
+	it("parses CSV without a header row (no metric dropped)", () => {
+		// 策略评价.csv 无表头，每行都是 "指标名,值"
+		const csv = "累积净值,1.23\n年化收益,14.97%\n最大回撤,-25.78%"
+		const raw = parsePerformanceCsv(csv)
+		assert.strictEqual(raw.累积净值, "1.23")
+		assert.strictEqual(raw.年化收益, "14.97%")
+	})
+
+	it("parses dual-value percent like 57.95% / 57.95% (first number wins)", () => {
+		const csv =
+			"年化收益,14.97%\n最大回撤,-25.78%\n年化收益/回撤比,0.58\n胜率（含0/去0）,57.95% / 57.95%\n盈亏收益比,1.35"
+		const metrics = performanceCsvToMetrics("v1", csv)
+		assert.strictEqual(metrics.win_rate_pct, 57.95)
+		assert.strictEqual(metrics.annual_return_pct, 14.97)
+		assert.strictEqual(metrics.max_drawdown_pct, -25.78)
+		assert.strictEqual(metrics.sharpe_ratio, 0.58)
+		assert.strictEqual(metrics.profit_loss_ratio, 1.35)
 	})
 })

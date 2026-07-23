@@ -65,6 +65,20 @@ describe("research-run", () => {
 		})
 	})
 
+	it("fills ts in local time with timezone offset (not UTC Zulu)", () => {
+		const { entry } = recordExperiment("run-tz", {
+			variantId: "v1",
+			hypothesis: "本地时区标注",
+			verdict: "completed",
+		})
+		// 形如 2026-07-23T02:36:24+08:00：本地时间 + 时区偏移，便于人工阅读 trace
+		assert.match(
+			entry.ts ?? "",
+			/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/,
+			`unexpected ts format: ${entry.ts}`,
+		)
+	})
+
 	it("rejects invalid entry", () => {
 		assert.throws(
 			() =>

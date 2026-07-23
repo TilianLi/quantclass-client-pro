@@ -6,7 +6,7 @@
 
 ## 0. 前置条件
 
-- QuantClass 客户端已启动，MCP 已连接（32 个工具可用）。
+- QuantClass 客户端已启动，MCP 已连接（38 个工具可用）。
 - 股票数据已下载、非交易时段（回测期间不能跑实盘）。
 - `run_backtest` 是长耗时阻塞调用（几分钟到几十分钟），确保 MCP 客户端超时设置足够。
 - 建议先 `get_system_status` 做一次预检。
@@ -83,12 +83,12 @@
    - 一键停用其余组：`set_strategy_weight(others_except=["{runId}_{variantId}"], weight=0)`
    - 需要查看库内状态时调 `list_library_strategies`（仅名称与权重）
    - 三层同步（config.json、localStorage、real_market_25.json），zeus 下次启动即生效，无需重启客户端
-3. 调 `run_backtest`（空参数），阻塞等待完成。该工具会校验本次回测产物（策略评价.csv 缺失或非本次生成 → 返回失败并提示内核日志位置）。
+3. 调 `run_backtest`（空参数），阻塞等待完成。该工具会校验本次回测产物（策略评价.csv 缺失或非本次生成 → 返回失败并提示内核日志位置）。用 `run_backtest_async` 时产物校验在 `get_backtest_task` 侧完成：`status=success` 但未产出本次结果会降级为 `status=error` 并附 `artifactError`。
 4. 回测失败（`code` 非 0 或错误文本）：跳到 4.5 记 `failed`（附错误摘要）。**连续 2 次回测失败则终止整个 run**：先 `get_system_status` 检查数据/内核状态，把诊断写入总结，按第 6 节收尾（不提交审阅）。
 
 ### 4.4 Evaluator：解析绩效与评估
 
-1. 调 `get_backtest_performance`（若返回「策略评价文件不存在」错误，按回测失败处理，见第 7 节）。成功时**直接取 `data.parsed`**——它是 5 项工作流标准指标的数值形式（`annual_return_pct`、`max_drawdown_pct`、`sharpe_ratio`、`win_rate_pct`、`profit_loss_ratio`），可直接作为 `evaluate_backtest` 的 metrics 与 `record_experiment` 的 metrics 使用，**不要手工解析字符串**。原始中文字符串仍在 `data.metrics` 中（`累积净值` 等 18 项），仅供撰写 lesson 时参考。`parsed` 的键缺失（如某项无法解析）时不要编造。
+1. 调 `get_backtest_performance`（若返回「策略评价文件不存在」错误，按回测失败处理，见第 7 节）。成功时**直接取 `data.parsed`**——它是 5 项工作流标准指标的数值形式（`annual_return_pct`、`max_drawdown_pct`、`sharpe_ratio`、`win_rate_pct`、`profit_loss_ratio`），可直接作为 `evaluate_backtest` 的 metrics 与 `record_experiment` 的 metrics 使用，**不要手工解析字符串**。原始中文字符串仍在 `data.metrics` 中（`累积净值` 等 18 项），仅供撰写 lesson 时参考。`parsed` 的键缺失（如某项无法解析）时不要编造。**口径注意：`sharpe_ratio` 实为「年化收益/回撤比」（Calmar 类口径），策略评价 18 项中并无真夏普率**——阈值设定与报告解读都按此口径，字段改名留待后续版本。
 2. 调 `evaluate_backtest`：`performances: [{ variantId, ...上一步的指标 }]`，`thresholds: brief.thresholds`。返回 `{ passed, bestVariantId, score, details }`——`score` 是达标项比例（0-1），`passed` 为全部达标。
 3. 判定 SOTA：与 4.1 获取的 `get_run_summary(runId).sota` 比较——先比 `score`，同分比 `annual_return_pct`。本轮更优则本轮为新 SOTA（`verdict = "sota"`），否则 `verdict = "completed"`。
 

@@ -21,6 +21,7 @@ import {
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { checkFactorSource } from "./factor-check.ts"
+import { pythonErrorHint, resolvePythonCmd, resourceScript } from "./paths.ts"
 
 const REQUIRED_VARS = ["backtest_name", "strategy_list"]
 
@@ -37,7 +38,7 @@ export function validateConfigSyntax(source: string): string[] {
 	try {
 		writeFileSync(tmpFile, source, "utf-8")
 		execFileSync(
-			process.platform === "win32" ? "python" : "python3",
+			resolvePythonCmd().cmd,
 			[
 				"-c",
 				"import ast; ast.parse(open(__import__('sys').argv[1], 'r', encoding='utf-8').read())",
@@ -273,17 +274,12 @@ export function validateStrategy(configPath: string): ValidationResult {
 		return { valid: false, errors: [`文件不存在: ${configPath}`] }
 	}
 
-	const pythonExe = join(process.cwd(), "resources", "python", "python.exe")
-	const parseScript = join(process.cwd(), "resources", "parse_config.py")
-	const pythonCmd = existsSync(pythonExe)
-		? pythonExe
-		: process.platform === "win32"
-			? "python"
-			: "python3"
+	const python = resolvePythonCmd()
+	const parseScript = resourceScript("parse_config.py")
 
 	try {
 		const output = execFileSync(
-			pythonCmd,
+			python.cmd,
 			[parseScript, configPath, ...REQUIRED_VARS],
 			{
 				encoding: "utf-8",
@@ -337,11 +333,10 @@ export function validateStrategy(configPath: string): ValidationResult {
 
 		return { valid: true, errors: [], extracted }
 	} catch (error) {
+		const msg = error instanceof Error ? error.message : String(error)
 		return {
 			valid: false,
-			errors: [
-				`校验失败: ${error instanceof Error ? error.message : String(error)}`,
-			],
+			errors: [`校验失败: ${msg}${pythonErrorHint(python, msg)}`],
 		}
 	}
 }
