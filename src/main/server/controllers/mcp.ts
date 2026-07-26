@@ -1398,6 +1398,11 @@ mcpRouter.get("/backtest/performance", async (c: Context) => {
 				parsed[enKey] = num
 			}
 		}
+		// 「年化收益/回撤比」的规范字段名为 calmar_ratio；sharpe_ratio 是历史误名，
+		// 两者一并输出，保证新旧调用方（evaluate_backtest / record_experiment）兼容
+		if (parsed.sharpe_ratio !== undefined) {
+			parsed.calmar_ratio = parsed.sharpe_ratio
+		}
 
 		return c.json({
 			code: 0,

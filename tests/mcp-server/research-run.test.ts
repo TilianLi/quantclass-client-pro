@@ -1,5 +1,11 @@
 import assert from "node:assert"
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { after, describe, it } from "node:test"
@@ -197,7 +203,9 @@ describe("research-run", () => {
 		assert.strictEqual(brief.validation?.end_date, null)
 	})
 
-	it("prefers lower complexity over annual return on score tie", () => {
+	it("prefers higher annual return over lower complexity on score tie", () => {
+		// SOTA 语义与 evaluate_backtest 对齐：score → 年化 → 复杂度
+		// （旧实现复杂度优先于年化，与 evaluate_backtest 相反，已统一）
 		recordExperiment("run-cx", {
 			variantId: "v1",
 			hypothesis: "h1",
@@ -214,7 +222,27 @@ describe("research-run", () => {
 			verdict: "completed",
 			complexity: 3,
 		})
-		assert.strictEqual(getRunSummary("run-cx").sota?.variantId, "v2")
+		assert.strictEqual(getRunSummary("run-cx").sota?.variantId, "v1")
+	})
+
+	it("prefers lower complexity when score and annual both tie", () => {
+		recordExperiment("run-ct", {
+			variantId: "v1",
+			hypothesis: "h1",
+			metrics: { annual_return_pct: 15 },
+			evaluation: { passed: false, score: 0.5 },
+			verdict: "completed",
+			complexity: 8,
+		})
+		recordExperiment("run-ct", {
+			variantId: "v2",
+			hypothesis: "h2",
+			metrics: { annual_return_pct: 15 },
+			evaluation: { passed: false, score: 0.5 },
+			verdict: "completed",
+			complexity: 3,
+		})
+		assert.strictEqual(getRunSummary("run-ct").sota?.variantId, "v2")
 	})
 
 	it("falls back to annual return when complexity absent", () => {
@@ -234,5 +262,276 @@ describe("research-run", () => {
 			complexity: 3,
 		})
 		assert.strictEqual(getRunSummary("run-cy").sota?.variantId, "v1")
+	})
+
+	it("auto-fills verdict when omitted (sota / completed / failed)", () => {
+		const r1 = recordExperiment("run-auto", {
+			variantId: "v1",
+			hypothesis: "h1",
+			metrics: { annual_return_pct: 12 },
+			evaluation: { passed: false, score: 0.3 },
+		})
+		// 首个有 evaluation 的实验即为当前最优
+		assert.strictEqual(r1.entry.verdict, "sota")
+		const r2 = recordExperiment("run-auto", {
+			variantId: "v2",
+			hypothesis: "h2",
+			metrics: { annual_return_pct: 9 },
+			evaluation: { passed: false, score: 0.2 },
+		})
+		assert.strictEqual(r2.entry.verdict, "completed")
+		const r3 = recordExperiment("run-auto", {
+			variantId: "v3",
+			hypothesis: "h3 配置错误未产出",
+		})
+		assert.strictEqual(r3.entry.verdict, "failed")
+	})
+
+	it("auto-fills type=dev and excludes validation entries from sota/trends", () => {
+		recordExperiment("run-val2", {
+			variantId: "v1",
+			hypothesis: "dev 实验",
+			metrics: { annual_return_pct: 12 },
+			evaluation: { passed: false, score: 0.5 },
+		})
+		recordExperiment("run-val2", {
+			variantId: "v1-validation",
+			hypothesis: "样本外验证",
+			type: "validation",
+			metrics: { annual_return_pct: 20 },
+			evaluation: { passed: true, score: 1 },
+		})
+		const summary = getRunSummary("run-val2")
+		// validation 不参与 SOTA 与趋势，只单独汇报
+		assert.strictEqual(summary.sota?.variantId, "v1")
+		assert.deepStrictEqual(
+			summary.trends.annual_return_pct.map((t) => t.value),
+			[12],
+		)
+		assert.strictEqual(summary.validation?.variantId, "v1-validation")
+		assert.strictEqual(summary.totalExperiments, 2)
+		const trace = getExperimentTrace("run-val2")
+		assert.strictEqual(trace.entries[0].type, "dev")
+		assert.strictEqual(trace.entries[1].type, "validation")
+		// validation 条目自动 verdict 为 completed（不进入 sota 竞争）
+		assert.strictEqual(trace.entries[1].verdict, "completed")
+	})
+
+	it("returns budget (used/remaining) from brief.evolving_n", () => {
+		createResearchRun("run-budget", BRIEF)
+		recordExperiment("run-budget", {
+			variantId: "v1",
+			hypothesis: "h1",
+			metrics: { annual_return_pct: 5 },
+			evaluation: { passed: false, score: 0 },
+		})
+		const r2 = recordExperiment("run-budget", {
+			variantId: "v2",
+			hypothesis: "h2",
+			metrics: { annual_return_pct: 6 },
+			evaluation: { passed: false, score: 0 },
+		})
+		assert.deepStrictEqual(r2.budget, { evolvingN: 3, used: 2, remaining: 1 })
+		// validation 条目不消耗迭代预算
+		const r3 = recordExperiment("run-budget", {
+			variantId: "v2-validation",
+			hypothesis: "样本外",
+			type: "validation",
+			metrics: { annual_return_pct: 6 },
+			evaluation: { passed: false, score: 0 },
+		})
+		assert.deepStrictEqual(r3.budget, { evolvingN: 3, used: 2, remaining: 1 })
+	})
+
+	it("auto-computes complexity from variant config.py when omitted", () => {
+		mkdirSync(join(TMP, "run-acx", "v1"), { recursive: true })
+		writeFileSync(
+			join(TMP, "run-acx", "v1", "config.py"),
+			`backtest_name = "run-acx_v1"
+strategy_list = [
+    {
+        "name": "run-acx_v1",
+        "factor_list": [
+            ["市值", True, None, 1.0],
+        ],
+        "filter_list": [
+            ["波动.波动率20", 20, "pct:<=0.5", True],
+        ],
+        "filter_list_post": [],
+        "cross_sections": [
+            ["高斯秩回归", "动量.动量20", 1.0],
+        ],
+    }
+]
+`,
+		)
+		const { entry } = recordExperiment("run-acx", {
+			variantId: "v1",
+			hypothesis: "h",
+			metrics: { annual_return_pct: 5 },
+			evaluation: { passed: false, score: 0 },
+		})
+		assert.strictEqual(entry.complexity, 3)
+		// 显式 complexity 优先，不覆盖
+		const r2 = recordExperiment("run-acx", {
+			variantId: "v1",
+			hypothesis: "h2",
+			complexity: 99,
+			metrics: { annual_return_pct: 6 },
+			evaluation: { passed: false, score: 0 },
+		})
+		assert.strictEqual(r2.entry.complexity, 99)
+	})
+
+	it("normalizes legacy sharpe_ratio to calmar_ratio in brief and metrics", () => {
+		createResearchRun("run-cal", {
+			goal: "calmar 归一化",
+			thresholds: { annual_return_pct: 10, sharpe_ratio: 0.5 },
+		})
+		recordExperiment("run-cal", {
+			variantId: "v1",
+			hypothesis: "h",
+			metrics: { annual_return_pct: 12, sharpe_ratio: 0.6 },
+			evaluation: { passed: true, score: 1 },
+		})
+		const summary = getRunSummary("run-cal")
+		const gap = summary.thresholdGaps?.calmar_ratio
+		assert.strictEqual(gap?.threshold, 0.5)
+		assert.strictEqual(gap?.value, 0.6)
+		assert.strictEqual(gap?.passed, true)
+		// 旧 sharpe_ratio 键不再出现在趋势键中
+		assert.ok(!("sharpe_ratio" in summary.trends))
+		assert.deepStrictEqual(
+			summary.trends.calmar_ratio.map((t) => t.value),
+			[0.6],
+		)
+	})
+})
+
+describe("research-run walkforward", () => {
+	const WF_BRIEF = {
+		goal: "walkforward dev 闭环",
+		thresholds: { annual_return_pct: 15, max_drawdown_pct: 25 },
+		walkforward: {
+			windows: [
+				{ start_date: "2018-01-01", end_date: "2020-12-31" },
+				{ start_date: "2021-01-01", end_date: "2022-12-31" },
+				{ start_date: "2023-01-01", end_date: null },
+			],
+		},
+		evolving_n: 5,
+	}
+
+	it("creates a run with walkforward brief", () => {
+		const { brief } = createResearchRun("run-wf", WF_BRIEF)
+		assert.strictEqual(brief.walkforward?.windows.length, 3)
+	})
+
+	it("rejects walkforward with fewer than 2 windows", () => {
+		assert.throws(() =>
+			createResearchRun("run-wf-1win", {
+				goal: "g",
+				thresholds: {},
+				walkforward: {
+					windows: [{ start_date: "2020-01-01", end_date: "2021-01-01" }],
+				},
+			}),
+		)
+	})
+
+	it("rejects windows with start >= end or unparseable dates", () => {
+		assert.throws(() =>
+			createResearchRun("run-wf-bad-order", {
+				goal: "g",
+				thresholds: {},
+				walkforward: {
+					windows: [
+						{ start_date: "2021-01-01", end_date: "2020-01-01" },
+						{ start_date: "2022-01-01", end_date: null },
+					],
+				},
+			}),
+		)
+		assert.throws(() =>
+			createResearchRun("run-wf-bad-date", {
+				goal: "g",
+				thresholds: {},
+				walkforward: {
+					windows: [
+						{ start_date: "not-a-date", end_date: "2020-01-01" },
+						{ start_date: "2022-01-01", end_date: null },
+					],
+				},
+			}),
+		)
+	})
+
+	it("rejects dev entry with metrics but no windows when walkforward configured", () => {
+		assert.throws(
+			() =>
+				recordExperiment("run-wf", {
+					variantId: "v1",
+					hypothesis: "绕过 walkforward 的单窗口记录",
+					metrics: { annual_return_pct: 20 },
+					evaluation: { passed: true, score: 1 },
+				}),
+			/run_dev_walkforward/,
+		)
+		// 拦截发生在写入之前，trace 仍为空
+		assert.strictEqual(getExperimentTrace("run-wf").total, 0)
+	})
+
+	it("allows failure entry without metrics/evaluation (failed verdict)", () => {
+		const { entry } = recordExperiment("run-wf", {
+			variantId: "v1",
+			hypothesis: "回测内核直接崩溃",
+		})
+		assert.strictEqual(entry.verdict, "failed")
+	})
+
+	it("records dev entry with windows detail from run_dev_walkforward", () => {
+		const { entry, budget } = recordExperiment("run-wf", {
+			variantId: "v1",
+			hypothesis: "三窗口稳健性检验",
+			metrics: { annual_return_pct: 10, max_drawdown_pct: -30 },
+			evaluation: { passed: false, score: 0 },
+			windows: [
+				{
+					window: { start_date: "2018-01-01", end_date: "2020-12-31" },
+					ok: true,
+					metrics: { annual_return_pct: 20, max_drawdown_pct: -15 },
+					evaluation: { passed: true, score: 1 },
+				},
+				{
+					window: { start_date: "2021-01-01", end_date: "2022-12-31" },
+					ok: true,
+					metrics: { annual_return_pct: 10, max_drawdown_pct: -30 },
+					evaluation: { passed: false, score: 0 },
+				},
+				{
+					window: { start_date: "2023-01-01", end_date: null },
+					ok: false,
+					error: "数据缺失",
+				},
+			],
+			worstWindow: { start_date: "2023-01-01", end_date: null },
+		})
+		assert.strictEqual(entry.windows?.length, 3)
+		assert.strictEqual(entry.worstWindow?.start_date, "2023-01-01")
+		// walkforward 实验消耗 1 轮预算（含前面的 failed 条目，共 2 条 dev）
+		assert.strictEqual(budget?.used, 2)
+		assert.strictEqual(budget?.remaining, 3)
+	})
+
+	it("validation entry is not subject to walkforward interception", () => {
+		const { entry } = recordExperiment("run-wf", {
+			variantId: "v1",
+			hypothesis: "validation 窗口样本外验证",
+			type: "validation",
+			metrics: { annual_return_pct: 12 },
+			evaluation: { passed: false, score: 0.5 },
+		})
+		assert.strictEqual(entry.type, "validation")
+		assert.strictEqual(entry.windows, undefined)
 	})
 })

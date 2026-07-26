@@ -86,10 +86,13 @@ src/
 │   └── global.css、index.css、themes.css、mdx.css、worker.ts
 ├── mcp-server/           # 独立 MCP Server（stdio 模式）
 │   ├── index.ts          # MCP Server 入口
-│   ├── tools.ts          # 注册 tools
-│   ├── resources.ts      # 注册 resources
+│   ├── tools.ts          # 注册 tools（42 个）
+│   ├── resources.ts      # 注册 resources（2 个）
 │   ├── client.ts         # 连接 Hono 服务的 HTTP 客户端
-│   ├── backtest-evaluator.ts、strategy-files.ts、strategy-validator.ts、review-submitter.ts
+│   ├── paths.ts          # 路径解析与穿越校验
+│   ├── backtest-evaluator.ts、strategy-files.ts、strategy-validator.ts、factor-check.ts、
+│   ├── review-submitter.ts、research-run.ts、backtest-diagnostics.ts、validation-gate.ts、
+│   │   walkforward-eval.ts
 └── shared/               # 跨进程共享类型（main/preload/renderer 均可引用，见 shared/README.md）
     ├── lib/、types/
     └── constants.ts
@@ -101,6 +104,15 @@ src/
 - `resources/mcp-server/index.js`：`pnpm build:mcp` 用 esbuild 打包的 MCP Server。
 - `resources/python/${arch}/`：内嵌 Python 运行时（通过 `pnpm download-python` 下载）。
 - `dist/`：electron-builder 最终安装包。
+
+### 3.2 仓库根目录其他值得注意的内容
+
+- `workspace/agent-strategies/`：默认的 AI 策略工作区（可被 `QUANTCLASS_AGENT_WORKSPACE` 覆盖），MCP 策略文件读写限定在此目录内。注意实际生效的工作区可能不在仓库内（例如被覆盖为 `S:\Quantclass\workspace\agent-strategies`），以 `get_strategy_workspace_root` 的返回为准；仓库内目录里可能只有历史 demo run。
+- `quantclass-strategy-fetch/`：一个面向 AI Agent 的技能目录（`SKILL.md` + `scripts/` + `references/`），描述"从官网下载分享会策略并导入客户端"的完整工作流，供外部 Agent 加载使用。
+- `build_variants.py` / `downloads/`：配合上述技能使用的辅助脚本与工作目录（生成可导入的 `config.py` 变体）。
+- `mcp-deploy/`：MCP Server 部署模板与说明（`mcp-config.template.json`）。
+- `bin/`：`rebuild.js`（原生模块重建）、`remove.js` / `notarize.js`（electron-builder 钩子）。
+- `scripts/`：构建与校验脚本（下载 Python、打包 MCP bundle、校验 tool 注册等）。
 
 ## 4. 开发与构建命令
 
@@ -178,7 +190,7 @@ pnpm verify:mcp-tools         # 校验 MCP tool 注册（scripts/verify-mcp-tool
 
 ### 5.2 Tool 分组
 
-当前 MCP Server 共注册 **38 个 tools**（`src/mcp-server/tools.ts`），分组如下：
+当前 MCP Server 共注册 **42 个 tools**（`src/mcp-server/tools.ts`），分组如下：
 
 - **系统控制（7 个）**：
   - `get_system_status`：获取系统运行状态
@@ -196,7 +208,7 @@ pnpm verify:mcp-tools         # 校验 MCP tool 注册（scripts/verify-mcp-tool
   - `get_account_info`：账户信息
   - `get_trading_info`：Aqua 交易信息
 
-- **回测工具（9 个）**：
+- **回测工具（10 个）**：
   - `get_backtest_config`：回测配置
   - `set_backtest_config`：设置回测配置
   - `run_backtest`：执行回测（含产物校验，响应带内核版本/耗时/产物路径）
@@ -206,6 +218,7 @@ pnpm verify:mcp-tools         # 校验 MCP tool 注册（scripts/verify-mcp-tool
   - `get_backtest_result`：回测选股结果
   - `get_backtest_performance`：回测绩效指标（含 parsed 数值字段）
   - `get_backtest_equity_curve`：回测资金曲线
+  - `get_backtest_diagnostics`：回测诊断（基于资金曲线计算分年度收益与回撤区间，供 lesson 归因）
 
 - **策略开发闭环（13 个）**：
   - `get_strategy_template`：获取策略开发模板（含可用因子清单）
@@ -218,15 +231,20 @@ pnpm verify:mcp-tools         # 校验 MCP tool 注册（scripts/verify-mcp-tool
   - `write_strategy_file`：写入策略文件
   - `write_factor_file`：写入自定义因子（时序/截面，AST 白名单静态检查后落盘，自动补 __init__.py）
   - `validate_strategy`：校验 config.py
-  - `evaluate_backtest`：评估多次回测结果
+  - `evaluate_backtest`：评估多次回测结果（最优选择语义：score→年化→低复杂度）
   - `compare_backtest_variants`：按阈值对比多个 variant 绩效并返回最优
   - `submit_strategy_for_review`：生成候选策略报告等待人工确认
 
-- **研究工作流（4 个）**：
-  - `create_research_run`：创建研究 run（brief.json：目标、阈值、回测区间、进化轮数）
-  - `record_experiment`：追加实验记录到 trace.jsonl（支持 fromLatestBacktest 自动抓绩效与内核版本）
+- **研究工作流（7 个）**：
+  - `create_research_run`：创建研究 run（brief.json：目标、阈值、回测区间、进化轮数；可选 walkforward 多窗口配置）
+  - `record_experiment`：追加实验记录到 trace.jsonl（支持 fromLatestBacktest 自动抓绩效与内核版本；verdict/complexity 缺省自动判定与统计；entry.type 区分 dev/validation；brief 含 evolving_n 时返回迭代预算。brief 配置 walkforward 后，带绩效的 dev 条目会被拦截并导向 run_dev_walkforward，仅放行无绩效的失败记录）
   - `get_experiment_trace`：读取实验 trace（支持 tail 截断）
-  - `get_run_summary`：汇总实验数、SOTA、阈值差距与指标趋势
+  - `get_run_summary`：汇总实验数、SOTA、validation 结果、阈值差距与指标趋势
+  - `run_dev_walkforward`：dev 迭代的 walkforward 稳健性检验（读 brief.walkforward.windows→快照回测配置→逐窗口回测并评估→恢复原配置→按最劣窗口口径汇总写入 type=dev 的 trace 条目，消耗 1 轮迭代预算；失败窗口 score 计 0，全部失败不写 trace）
+  - `run_validation`：启动 validation 闸门（快照当前回测配置→切到 brief.validation 窗口→异步回测）
+  - `complete_validation`：完成 validation 闸门（恢复原回测配置→记录 type=validation 的样本外结果）
+
+> 指标命名约定：`calmar_ratio`（年化收益/最大回撤，Calmar 口径）是规范字段名；`sharpe_ratio` 是历史误名，作为兼容别名在输入输出中保留，新代码与 brief/threshold 应使用 `calmar_ratio`。SOTA 语义在 `evaluate_backtest`、`compare_backtest_variants`、`get_run_summary`、`record_experiment` 四处统一：先比达标率 score，同分比年化收益，再同分比低复杂度。
 
 ### 5.3 Resources
 
@@ -239,7 +257,7 @@ pnpm verify:mcp-tools         # 校验 MCP tool 注册（scripts/verify-mcp-tool
 
 - 仅监听 `127.0.0.1`，不对外暴露。
 - 除 `/mcp/status` 只读状态接口外，其余路由需 `Authorization: Bearer <mcp-token>`。
-- 策略文件读写限制在 `QUANTCLASS_AGENT_WORKSPACE`（默认 `workspace/agent-strategies`），并做路径穿越校验。
+- 策略文件读写限制在 `QUANTCLASS_AGENT_WORKSPACE`（默认 `workspace/agent-strategies`），并做路径穿越校验（见 `src/mcp-server/paths.ts`）。
 
 ## 6. 代码风格与约定
 
@@ -301,16 +319,20 @@ pnpm verify:mcp-tools         # 校验 MCP tool 注册（scripts/verify-mcp-tool
 pnpm test:mcp                 # 运行 tests/mcp-server/**/*.test.ts
 ```
 
-当前测试覆盖（`tests/mcp-server/`）：
+当前测试覆盖（`tests/mcp-server/`，共 12 个测试文件）：
 
 - `sanity.test.ts`
+- `paths.test.ts`
 - `backtest-evaluator.test.ts`
+- `backtest-diagnostics.test.ts`
+- `validation-gate.test.ts`
 - `strategy-files.test.ts`
 - `strategy-validator.test.ts`
 - `factor-check.test.ts`
 - `tools.test.ts`
 - `review-submitter.test.ts`
 - `research-run.test.ts`
+- `walkforward-eval.test.ts`
 
 新增业务逻辑（尤其是 MCP Server 下的纯函数）应补充对应测试。
 
@@ -320,7 +342,7 @@ pnpm test:mcp                 # 运行 tests/mcp-server/**/*.test.ts
 - **CSP**：`src/renderer/index.html` 已设置 Content-Security-Policy。
 - **路径安全**：文件系统操作（MCP、策略导入等）需校验路径，禁止穿越到工作区之外。
 - **Token 安全**：MCP token 写入用户 home 目录 `~/.quantclass/mcp-token`，避免硬编码或日志打印。
-- **内嵌 Python**：仅用于解析本地 `config.py`（`resources/parse_config.py`），不要执行任意用户输入。
+- **内嵌 Python**：仅用于解析本地 `config.py`（`resources/parse_config.py`）与因子静态检查（`resources/check_factor.py`），不要执行任意用户输入。
 - **自动交易**：涉及真实资金的接口（`toggle_auto_trading`、`exec_min_data` 等）需谨慎变更，建议保留显式确认或白名单校验。
 
 ## 9. 部署与发布流程
@@ -337,7 +359,7 @@ pnpm test:mcp                 # 运行 tests/mcp-server/**/*.test.ts
 
 - Windows 打包可能受杀毒软件/Defender 拦截，必要时加白名单；NSIS 长路径问题可通过组策略开启 Win32 long paths（详细排查步骤见 `README.md`）。
 - macOS 签名/公证需要本地 `.env.release.local` 环境变量，并手动执行 `xcrun notarytool` 与 `stapler`（命令见 `README.md`）。
-- `electron-builder.yml` 中配置了 `extraResources`：Python 运行时、`parse_config.py`、MCP Server bundle、Monaco Editor 资源等。
+- `electron-builder.yml` 中配置了 `extraResources`：Python 运行时、`parse_config.py`、`check_factor.py`、MCP Server bundle、Monaco Editor 资源等；`asarUnpack` 包含 `resources/**`。
 - `electron-builder.beta.yml` 用于内测版打包，安装包文件名带 `BUILD_TIMESTAMP` 时间戳后缀。
 
 ## 10. 环境变量
