@@ -313,5 +313,126 @@ class TestMarketData(FixtureTestCase):
         self.assertEqual(cal[0], pd.Timestamp(self.START))
 
 
+class TestFactorCompute(FixtureTestCase):
+    def _load_df(self, code="sh600000"):
+        return fc.load_stock_csv(os.path.join(self.pool_dir, code + ".csv"))
+
+    def test_load_custom_factor_module(self):
+        module, path = fc.load_custom_factor_module([self.factor_dir], "动量.动量N")
+        self.assertTrue(path.endswith(os.path.join("动量", "动量N.py")))
+        self.assertTrue(hasattr(module, "add_factor"))
+        # 裸名 → 因子库/名.py
+        bare_dir = os.path.join(self.tmp, "bare-lib")
+        os.makedirs(bare_dir)
+        with open(os.path.join(bare_dir, "动量N.py"), "w", encoding="utf-8") as f:
+            f.write(MOM_FACTOR)
+        module2, _ = fc.load_custom_factor_module([bare_dir], "动量N")
+        self.assertTrue(hasattr(module2, "add_factor"))
+        # 找不到 → (None, 候选路径)
+        module3, candidates = fc.load_custom_factor_module(
+            [self.factor_dir], "不存在因子"
+        )
+        self.assertIsNone(module3)
+        self.assertEqual(len(candidates), 1)
+
+    def test_compute_stock_factor_frame(self):
+        df = self._load_df()
+        mom_mod, _ = fc.load_custom_factor_module([self.factor_dir], "动量.动量N")
+        bad_mod, _ = fc.load_custom_factor_module([self.factor_dir], "动量.坏因子")
+        specs = [
+            {
+                "label": "收盘价",
+                "name": "收盘价",
+                "param": None,
+                "kind": "builtin",
+                "builtin": fc.BUILTIN_FACTOR_MAP["收盘价"],
+            },
+            {
+                "label": "动量.动量N(10)",
+                "name": "动量.动量N",
+                "param": 10,
+                "kind": "custom",
+                "module": mom_mod,
+            },
+            {
+                "label": "动量.坏因子",
+                "name": "动量.坏因子",
+                "param": None,
+                "kind": "custom",
+                "module": bad_mod,
+            },
+        ]
+        frame, errors = fc.compute_stock_factor_frame(df, specs)
+        self.assertIn("收盘价", frame.columns)
+        self.assertIn("动量.动量N(10)", frame.columns)
+        # 坏因子不进矩阵，错误被记录（单因子不拖垮整体）
+        self.assertNotIn("动量.坏因子", frame.columns)
+        self.assertIn("动量.坏因子", errors)
+        # builtin 收盘价 = 后复权收盘价
+        hfq_close, _ = fc.hfq_restore(df)
+        pd.testing.assert_series_equal(frame["收盘价"], hfq_close, check_names=False)
+        # 自定义因子收到的是后复权数据：与 hfq 收盘价 pct_change(10) 一致
+        expected = hfq_close.pct_change(10)
+        pd.testing.assert_series_equal(
+            frame["动量.动量N(10)"], expected, check_names=False
+        )
+
+    def test_compute_stock_factor_frame_uses_hfq(self):
+        # 构造含除权日的数据：自定义因子应基于后复权价，不出现 -50% 假跌幅
+        dates = pd.bdate_range("2024-01-02", periods=15)
+        closes = [10.0] * 7 + [5.0] * 8
+        prevs = [10.0] * 7 + [5.0] + [5.0] * 7  # 第 8 天除权（参考价同步 5.0）
+        df = pd.DataFrame(
+            {"收盘价": closes, "前收盘价": prevs, "成交额": [1e6] * 15},
+            index=dates,
+        )
+        mom_mod, _ = fc.load_custom_factor_module([self.factor_dir], "动量.动量N")
+        specs = [
+            {
+                "label": "m",
+                "name": "动量.动量N",
+                "param": 5,
+                "kind": "custom",
+                "module": mom_mod,
+            }
+        ]
+        frame, errors = fc.compute_stock_factor_frame(df, specs)
+        self.assertEqual(errors, {})
+        # 后复权价全程不变 → 动量恒为 0；若误用原始价，除权日会出现 -0.5
+        np.testing.assert_allclose(frame["m"].dropna().to_numpy(), 0.0, atol=1e-9)
+
+    def test_align_and_build_sections(self):
+        # 用内置收盘价因子（全程非 NaN），避免 rolling 预热期干扰截面计数断言
+        df = self._load_df()
+        specs = [
+            {
+                "label": "收盘价",
+                "name": "收盘价",
+                "param": None,
+                "kind": "builtin",
+                "builtin": fc.BUILTIN_FACTOR_MAP["收盘价"],
+            }
+        ]
+        frame, _ = fc.compute_stock_factor_frame(df, specs)
+        section_dates = list(pd.bdate_range(self.START, periods=self.N_DAYS)[::10])
+        aligned = fc.align_to_sections(frame, section_dates)
+        self.assertEqual(list(aligned.index), section_dates)
+        # as-of 语义：截面日取值 = 截至当日最后可见值
+        for d in section_dates:
+            self.assertEqual(
+                aligned.loc[d, "收盘价"],
+                frame.loc[:d, "收盘价"].iloc[-1],
+            )
+        matrices = fc.build_section_matrices(
+            {"sh600000": aligned, "sz300001": aligned}, section_dates, min_stocks=2
+        )
+        self.assertEqual(len(matrices), len(section_dates))
+        _, mat = matrices[0]
+        self.assertEqual(sorted(mat.index), ["sh600000", "sz300001"])
+        # 股票数不足 min_stocks 的截面被剔除
+        few = fc.build_section_matrices({"sh600000": aligned}, section_dates, 2)
+        self.assertEqual(few, [])
+
+
 if __name__ == "__main__":
     unittest.main()

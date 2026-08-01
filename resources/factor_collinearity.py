@@ -263,3 +263,90 @@ def hfq_restore(df):
     hfq_close = valid.iloc[0] * adj / adj.iloc[0]
     ratio = hfq_close / close
     return hfq_close, ratio
+
+
+def load_custom_factor_module(factor_dirs, name):
+    """
+    按因子名定位并加载模块：'类目.名' → <dir>/类目/名.py；裸名 → <dir>/名.py。
+    返回 (module, path)；文件不存在返回 (None, 候选路径列表)。
+    加载异常（语法错误等）向上抛，由调用方标记 status=error。
+    因子文件写入时已过 AST 白名单静态检查（write_factor_file），此处信任执行。
+    """
+    rel = name.split(".")
+    candidates = [os.path.join(d, *rel) + ".py" for d in factor_dirs]
+    for path in candidates:
+        if not os.path.isfile(path):
+            continue
+        spec = importlib.util.spec_from_file_location(
+            "qc_coll_" + str(abs(hash(os.path.abspath(path)))), path
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module, path
+    return None, candidates
+
+
+def compute_stock_factor_frame(df, factor_specs):
+    """
+    计算单只股票的因子值矩阵。
+    df: load_stock_csv 结果（原始价）；factor_specs: list[dict]，kind=builtin
+    带 builtin=(mode, 列名)，kind=custom 带 module。
+    自定义因子收到后复权价量（内核口径：因子计算用后复权数据）。
+    返回 (DataFrame[index=交易日期, columns=label], errors: dict[label, str])。
+    """
+    hfq_close, ratio = hfq_restore(df)
+    work = df.copy()
+    work["收盘价"] = hfq_close
+    for col in ("开盘价", "最高价", "最低价"):
+        if col in work.columns:
+            work[col] = pd.to_numeric(work[col], errors="coerce") * ratio
+    cols = {}
+    errors = {}
+    for spec in factor_specs:
+        label = spec["label"]
+        try:
+            if spec["kind"] == "builtin":
+                mode, col = spec["builtin"]
+                if col not in df.columns:
+                    raise KeyError(f"行情 CSV 缺少列: {col}")
+                if mode == "price":
+                    series = pd.to_numeric(work[col], errors="coerce")
+                else:
+                    series = pd.to_numeric(df[col], errors="coerce")
+            else:
+                col_name = "__qc_col__"
+                result = spec["module"].add_factor(
+                    work.copy(), param=spec["param"], col_name=col_name
+                )
+                series = pd.to_numeric(result[col_name], errors="coerce")
+            cols[label] = series
+        except Exception as exc:
+            errors[label] = f"{type(exc).__name__}: {exc}"
+    frame = pd.DataFrame(cols, index=df.index) if cols else pd.DataFrame(index=df.index)
+    return frame, errors
+
+
+def align_to_sections(frame, section_dates):
+    """取每个调仓日「截至当日最后可见」的因子值（ffill as-of 对齐）。"""
+    if frame.empty:
+        return frame
+    idx = frame.index.union(section_dates)
+    return frame.reindex(idx).ffill().reindex(section_dates)
+
+
+def build_section_matrices(stock_frames, section_dates, min_stocks=30):
+    """
+    组装逐日截面矩阵。
+    stock_frames: {code: DataFrame(index=section_dates, columns=labels)}（已 as-of 对齐）。
+    剔除全空行（停牌/无数据个股）与股票数不足 min_stocks 的截面。
+    返回 list[(date, DataFrame[index=code, columns=label])]。
+    """
+    matrices = []
+    for d in section_dates:
+        rows = {code: f.loc[d] for code, f in stock_frames.items() if d in f.index}
+        if not rows:
+            continue
+        mat = pd.DataFrame(rows).T.dropna(how="all")
+        if len(mat) >= min_stocks:
+            matrices.append((d, mat))
+    return matrices
