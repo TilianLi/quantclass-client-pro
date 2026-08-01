@@ -192,3 +192,74 @@ def compute_rebalance_dates(strategy_list, trade_dates, start_date, end_date, ma
         sel = np.linspace(0, len(dates) - 1, max_sections).round().astype(int)
         dates = [dates[i] for i in sorted(set(sel))]
     return dates
+
+
+def _pool_dir(data_dir):
+    """行情目录：优先 stock-trading-data-pro，fallback stock-trading-data。"""
+    for sub in ("stock-trading-data-pro", "stock-trading-data"):
+        d = os.path.join(data_dir, sub)
+        if os.path.isdir(d):
+            return d
+    raise RuntimeError(
+        "行情数据目录不存在: "
+        + os.path.join(data_dir, "stock-trading-data-pro")
+        + "（请检查 ALL_DATA_PATH 或先执行历史数据更新）"
+    )
+
+
+def list_stock_pool(data_dir, filters):
+    """全市场股票代码列表，按板块前缀过滤（filters 值为 "1" 时剔除该板块）。"""
+    pool_dir = _pool_dir(data_dir)
+    codes = []
+    for fn in sorted(os.listdir(pool_dir)):
+        if not fn.endswith(".csv"):
+            continue
+        code = fn[: -len(".csv")]
+        if filters.get("kcb") == "1" and code.startswith("sh68"):
+            continue
+        if filters.get("cyb") == "1" and code.startswith("sz30"):
+            continue
+        if filters.get("bj") == "1" and code.startswith("bj"):
+            continue
+        codes.append(code)
+    return pool_dir, codes
+
+
+def load_stock_csv(path):
+    """行情 CSV：GBK 编码，第一行为广告行（跳过），第二行为表头；按交易日期索引。"""
+    df = pd.read_csv(path, encoding="gbk", skiprows=1, low_memory=False)
+    df["交易日期"] = pd.to_datetime(df["交易日期"], errors="coerce")
+    df = df.dropna(subset=["交易日期"])
+    df = df.sort_values("交易日期").set_index("交易日期")
+    return df[~df.index.duplicated(keep="last")]
+
+
+def load_trade_calendar(data_dir):
+    """用浦发银行（或目录内首只）股票的交易日作为全市场交易日历。"""
+    pool_dir = _pool_dir(data_dir)
+    ref = os.path.join(pool_dir, "sh600000.csv")
+    if not os.path.isfile(ref):
+        csvs = [f for f in sorted(os.listdir(pool_dir)) if f.endswith(".csv")]
+        if not csvs:
+            raise RuntimeError(f"行情目录为空: {pool_dir}")
+        ref = os.path.join(pool_dir, csvs[0])
+    return load_stock_csv(ref).index
+
+
+def hfq_restore(df):
+    """
+    后复权还原：前收盘价为除权参考价，收盘价/前收盘价 = 真实日收益，
+    链式累乘得复权因子，锚定首日复权价 = 首日收盘价（标准后复权口径）。
+    返回 (hfq_close, ratio)；ratio = hfq_close/收盘价，用于同步还原 开/高/低。
+    """
+    close = pd.to_numeric(df["收盘价"], errors="coerce")
+    prev = pd.to_numeric(df["前收盘价"], errors="coerce")
+    ret = close / prev
+    ret = ret.where(np.isfinite(ret) & (ret > 0), 1.0)
+    adj = ret.cumprod()
+    valid = close.dropna()
+    if valid.empty:
+        return close, pd.Series(1.0, index=df.index)
+    hfq_close = valid.iloc[0] * adj / adj.iloc[0]
+    ratio = hfq_close / close
+    return hfq_close, ratio

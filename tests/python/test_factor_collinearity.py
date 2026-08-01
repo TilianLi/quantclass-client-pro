@@ -261,5 +261,57 @@ class TestConfigParsing(FixtureTestCase):
         self.assertEqual(sampled[-1], cal[-1])
 
 
+class TestMarketData(FixtureTestCase):
+    def test_load_stock_csv_gbk(self):
+        df = fc.load_stock_csv(os.path.join(self.pool_dir, "sh600000.csv"))
+        self.assertEqual(len(df), self.N_DAYS)
+        self.assertEqual(df.index.name, "交易日期")
+        self.assertIn("换手率TTM", df.columns)
+        self.assertEqual(df.index[0], pd.Timestamp(self.START))
+        self.assertEqual(df.index[-1], pd.Timestamp(self.END))
+
+    def test_hfq_restore_ex_dividend(self):
+        # 除权日：前收盘价为除权参考价（5.5），收盘价 5.5 → 真实收益 0
+        df = pd.DataFrame(
+            {"收盘价": [10.0, 11.0, 5.5], "前收盘价": [10.0, 10.0, 5.5]},
+            index=pd.bdate_range("2024-01-02", periods=3),
+        )
+        hfq_close, ratio = fc.hfq_restore(df)
+        np.testing.assert_allclose(hfq_close.to_numpy(), [10.0, 11.0, 11.0], atol=1e-9)
+        np.testing.assert_allclose(ratio.to_numpy(), [1.0, 1.0, 2.0], atol=1e-9)
+
+    def test_pool_dir_fallback(self):
+        # 只有 stock-trading-data（无 -pro）时回退
+        legacy = os.path.join(self.tmp, "LegacyData")
+        os.makedirs(os.path.join(legacy, "stock-trading-data"))
+        self.assertEqual(
+            fc._pool_dir(legacy), os.path.join(legacy, "stock-trading-data")
+        )
+        self.assertEqual(
+            fc._pool_dir(self.data_dir),
+            os.path.join(self.data_dir, "stock-trading-data-pro"),
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            fc._pool_dir(os.path.join(self.tmp, "nonexistent"))
+        self.assertIn("ALL_DATA_PATH", str(ctx.exception))
+
+    def test_list_stock_pool_filters(self):
+        _, all_codes = fc.list_stock_pool(
+            self.data_dir, {"kcb": "0", "cyb": "0", "bj": "0"}
+        )
+        self.assertEqual(
+            all_codes, ["bj430001", "sh600000", "sh680001", "sz300001"]
+        )
+        _, filtered = fc.list_stock_pool(
+            self.data_dir, {"kcb": "1", "cyb": "1", "bj": "1"}
+        )
+        self.assertEqual(filtered, ["sh600000"])
+
+    def test_load_trade_calendar(self):
+        cal = fc.load_trade_calendar(self.data_dir)
+        self.assertEqual(len(cal), self.N_DAYS)
+        self.assertEqual(cal[0], pd.Timestamp(self.START))
+
+
 if __name__ == "__main__":
     unittest.main()
