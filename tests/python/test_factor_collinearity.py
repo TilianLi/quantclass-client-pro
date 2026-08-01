@@ -401,6 +401,45 @@ class TestFactorCompute(FixtureTestCase):
         # 后复权价全程不变 → 动量恒为 0；若误用原始价，除权日会出现 -0.5
         np.testing.assert_allclose(frame["m"].dropna().to_numpy(), 0.0, atol=1e-9)
 
+    def test_compute_stock_factor_frame_hfq_prev_close(self):
+        # 自定义因子手写日收益 收盘价/前收盘价：两列须同为后复权口径，
+        # 否则除权日得到 hfq/raw 混合尺度的虚假收益
+        ret_dir = os.path.join(self.tmp, "ret-lib")
+        os.makedirs(ret_dir)
+        ret_factor = '''import pandas as pd
+
+fin_cols = []
+
+
+def add_factor(df, param=None, **kwargs):
+    col_name = kwargs["col_name"]
+    df[col_name] = df["收盘价"] / df["前收盘价"] - 1.0
+    return df[[col_name]]
+'''
+        with open(os.path.join(ret_dir, "日收益.py"), "w", encoding="utf-8") as f:
+            f.write(ret_factor)
+        dates = pd.bdate_range("2024-01-02", periods=15)
+        closes = [10.0] * 7 + [5.0] * 8
+        prevs = [10.0] * 7 + [5.0] + [5.0] * 7  # 第 8 天除权（参考价同步 5.0）
+        df = pd.DataFrame(
+            {"收盘价": closes, "前收盘价": prevs, "成交额": [1e6] * 15},
+            index=dates,
+        )
+        ret_mod, _ = fc.load_custom_factor_module([ret_dir], "日收益")
+        specs = [
+            {
+                "label": "r",
+                "name": "日收益",
+                "param": None,
+                "kind": "custom",
+                "module": ret_mod,
+            }
+        ]
+        frame, errors = fc.compute_stock_factor_frame(df, specs)
+        self.assertEqual(errors, {})
+        # 后复权口径下全程真实收益为 0；前收盘价未还原时除权日会出现 +1.0
+        np.testing.assert_allclose(frame["r"].dropna().to_numpy(), 0.0, atol=1e-9)
+
     def test_align_and_build_sections(self):
         # 用内置收盘价因子（全程非 NaN），避免 rolling 预热期干扰截面计数断言
         df = self._load_df()

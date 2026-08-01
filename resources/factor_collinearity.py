@@ -291,13 +291,14 @@ def compute_stock_factor_frame(df, factor_specs):
     计算单只股票的因子值矩阵。
     df: load_stock_csv 结果（原始价）；factor_specs: list[dict]，kind=builtin
     带 builtin=(mode, 列名)，kind=custom 带 module。
-    自定义因子收到后复权价量（内核口径：因子计算用后复权数据）。
+    自定义因子收到后复权价格（开/高/低/收 + 前收盘价同步还原，量额列保持原始值；
+    内核口径：因子计算用后复权数据）。
     返回 (DataFrame[index=交易日期, columns=label], errors: dict[label, str])。
     """
     hfq_close, ratio = hfq_restore(df)
     work = df.copy()
     work["收盘价"] = hfq_close
-    for col in ("开盘价", "最高价", "最低价"):
+    for col in ("开盘价", "最高价", "最低价", "前收盘价"):
         if col in work.columns:
             work[col] = pd.to_numeric(work[col], errors="coerce") * ratio
     cols = {}
