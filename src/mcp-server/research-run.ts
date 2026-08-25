@@ -13,6 +13,7 @@ import {
 	existsSync,
 	mkdirSync,
 	readFileSync,
+	readdirSync,
 	writeFileSync,
 } from "node:fs"
 import { join } from "node:path"
@@ -122,6 +123,12 @@ export const experimentEntrySchema = z.object({
 	ts: z.string().optional(),
 	variantId: z.string().min(1),
 	hypothesis: z.string().min(1),
+	/** 分叉父 variantId（缺省视为上一 variant，保持线性语义） */
+	basedOn: z.string().optional(),
+	/** 假设来源引用，推荐 knowledge:<id> / trace:<runId>/<variantId> / none */
+	hypothesisSource: z.string().optional(),
+	/** 预埋给下一轮的假设种子（对应 RD-Agent feedback 阶段的 new_hypothesis） */
+	nextHypothesis: z.string().optional(),
 	changes: z.string().optional(),
 	files: z.array(z.string()).optional(),
 	/** 实验类型：dev=迭代实验（缺省按 dev 处理），validation=终局样本外验证（不进 SOTA/趋势） */
@@ -220,7 +227,7 @@ function normalizeMetrics<T extends Metrics | undefined>(metrics: T): T {
  * 本地时间 ISO 格式（带时区偏移），如 2026-07-23T02:36:24+08:00。
  * trace/brief 需要人工阅读，避免 UTC Zulu 时间造成的时区换算负担。
  */
-function localTimestamp(d = new Date()): string {
+export function localTimestamp(d = new Date()): string {
 	const pad = (n: number) => String(n).padStart(2, "0")
 	const offsetMin = -d.getTimezoneOffset()
 	const sign = offsetMin >= 0 ? "+" : "-"
@@ -306,6 +313,33 @@ function metricGap(key: MetricKey, value: number, threshold: number): number {
 		: value - threshold
 }
 
+const LESSON_PLACEHOLDER = /^(待回填|待定|暂无|无|tbd|todo|n\/a|none)[。.\s]*$/i
+
+/** lesson 是进化循环的核心载体，占位文本拒绝写入（只拦写入，不影响历史条目读取） */
+function assertLessonNotPlaceholder(lesson: string | undefined): void {
+	if (lesson !== undefined && LESSON_PLACEHOLDER.test(lesson.trim())) {
+		throw new Error(
+			`lesson 为占位文本（"${lesson}"）：请写具体结论——哪个指标未达、差距多少、下一步假设方向`,
+		)
+	}
+}
+
+/** 字符 bigram Jaccard 相似度（归一化后），用于假设查重警告 */
+export function hypothesisSimilarity(a: string, b: string): number {
+	const norm = (s: string) => s.toLowerCase().replace(/[\s\p{P}\p{S}]/gu, "")
+	const grams = (s: string) => {
+		const g = new Set<string>()
+		for (let i = 0; i < s.length - 1; i++) g.add(s.slice(i, i + 2))
+		return g
+	}
+	const sa = grams(norm(a))
+	const sb = grams(norm(b))
+	if (sa.size === 0 || sb.size === 0) return 0
+	let inter = 0
+	for (const g of sa) if (sb.has(g)) inter++
+	return inter / (sa.size + sb.size - inter)
+}
+
 // ============================================================
 // 复杂度自动统计
 // ============================================================
@@ -389,6 +423,8 @@ export interface RecordExperimentResult {
 	entry: ExperimentEntry
 	/** 迭代预算（brief 含 evolving_n 时返回）：dev 条目计数与剩余轮次 */
 	budget: { evolvingN: number; used: number; remaining: number } | null
+	/** 非阻断警告（如假设与历史条目近似重复） */
+	warnings?: string[]
 }
 
 export function recordExperiment(
@@ -400,6 +436,18 @@ export function recordExperiment(
 		mkdirSync(dir, { recursive: true })
 	}
 	const parsed = parseWith(experimentEntrySchema, entry, "entry")
+
+	assertLessonNotPlaceholder(parsed.lesson)
+
+	const warnings: string[] = []
+	const priorEntries = readTraceEntries(runId)
+	for (const e of priorEntries) {
+		if (hypothesisSimilarity(parsed.hypothesis, e.hypothesis) > 0.7) {
+			warnings.push(
+				`假设与 ${e.variantId} 高度相似（相似度>0.7）："${e.hypothesis.slice(0, 50)}..."——请确认不是重复实验`,
+			)
+		}
+	}
 
 	// brief 读取一次，供 walkforward 强制拦截与迭代预算共用
 	const brief = readBriefFile(runId)
@@ -446,7 +494,7 @@ export function recordExperiment(
 
 	// verdict 缺省时自动判定（显式传入永远优先）
 	if (full.verdict === undefined) {
-		full.verdict = autoVerdict(full, readTraceEntries(runId))
+		full.verdict = autoVerdict(full, priorEntries)
 	}
 
 	const path = tracePath(runId)
@@ -465,7 +513,7 @@ export function recordExperiment(
 		}
 	}
 
-	return { runId, tracePath: path, entry: full, budget }
+	return { runId, tracePath: path, entry: full, budget, warnings }
 }
 
 /**
@@ -638,4 +686,80 @@ export function getRunSummary(runId: string): RunSummary {
 		thresholdGaps,
 		trends,
 	}
+}
+
+// ============================================================
+// run 生命周期
+// ============================================================
+
+export type RunStatus = "active" | "achieved" | "abandoned" | "paused"
+
+/**
+ * 关闭 run：把 status/closedAt/closeReason 写入 brief.json。
+ * 读 brief 原文 JSON 合并写回（不经 schema strip，保留全部既有字段）。
+ * achieved 要求存在 SOTA 记录；重复 close 允许（更新状态与原因）。
+ */
+export function closeRun(
+	runId: string,
+	status: Exclude<RunStatus, "active">,
+	reason: string,
+): { runId: string; status: RunStatus; closedAt: string } {
+	const dir = runDir(runId)
+	if (!existsSync(dir)) throw new Error(`run 不存在: ${runId}`)
+	if (!reason || !reason.trim()) throw new Error("closeReason 必填")
+	const path = briefPath(runId)
+	if (!existsSync(path)) {
+		throw new Error(`run ${runId} 缺少 brief.json，请先 create_research_run`)
+	}
+	// achieved 要求 trace 中存在 verdict=sota 的记录
+	// （getRunSummary().sota 会回退到任意有 evaluation 的条目，口径太宽）
+	if (status === "achieved" && getRunSummary(runId).verdictCounts.sota === 0) {
+		throw new Error(`run ${runId} 无 SOTA 记录，不能以 achieved 关闭`)
+	}
+	let raw: Record<string, unknown>
+	try {
+		raw = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>
+	} catch {
+		throw new Error(`brief.json 不是合法 JSON: ${path}`)
+	}
+	const closedAt = localTimestamp()
+	writeFileSync(
+		path,
+		`${JSON.stringify({ ...raw, status, closedAt, closeReason: reason.trim() }, null, 2)}\n`,
+		"utf-8",
+	)
+	return { runId, status, closedAt }
+}
+
+/** 各 run 的状态映射（无 brief 或无 status 字段的 run 不出现）。供 list_strategies 组装。 */
+export function getRunStatuses(): Record<
+	string,
+	{ status: RunStatus; closeReason?: string }
+> {
+	const result: Record<string, { status: RunStatus; closeReason?: string }> = {}
+	for (const name of readdirSync(getWorkspaceRoot(), { withFileTypes: true })
+		.filter((d) => d.isDirectory())
+		.map((d) => d.name)) {
+		const path = join(getWorkspaceRoot(), name, "brief.json")
+		if (!existsSync(path)) continue
+		try {
+			const raw = JSON.parse(readFileSync(path, "utf-8")) as Record<
+				string,
+				unknown
+			>
+			if (
+				typeof raw.status === "string" &&
+				["achieved", "abandoned", "paused"].includes(raw.status)
+			) {
+				result[name] = {
+					status: raw.status as RunStatus,
+					closeReason:
+						typeof raw.closeReason === "string" ? raw.closeReason : undefined,
+				}
+			}
+		} catch {
+			// 单个 run 的 brief 损坏不影响整体列表
+		}
+	}
+	return result
 }

@@ -6,7 +6,7 @@
 
 ## 0. 前置条件
 
-- QuantClass 客户端已启动，MCP 已连接（38 个工具可用）。
+- QuantClass 客户端已启动，MCP 已连接（46 个工具可用）。
 - 股票数据已下载、非交易时段（回测期间不能跑实盘）。
 - `run_backtest` 是长耗时阻塞调用（几分钟到几十分钟），确保 MCP 客户端超时设置足够。
 - 建议先 `get_system_status` 做一次预检。
@@ -21,11 +21,11 @@
 
 | 角色 | 职责 | 工具 |
 |------|------|------|
-| Researcher | 读 brief + trace，提出一个可证伪假设 | `get_experiment_trace`、`get_run_summary`、`get_strategy_template` |
+| Researcher | 读 brief + trace，提出一个可证伪假设 | `get_experiment_trace`、`get_run_summary`、`get_strategy_template`、`get_knowledge`、`list_factor_components` |
 | Developer | 把假设实现为策略文件并校验通过 | `get_strategy_workspace_root`、`write_strategy_file`、`read_strategy_file`、`list_strategies`、`validate_strategy` |
 | Runner | 导入策略、权重隔离、执行回测 | `import_strategy`、`set_strategy_weight`、`list_library_strategies`、`set_backtest_config`、`run_backtest`（长回测可换 `run_backtest_async` + `get_backtest_task`） |
 | Evaluator | 解析绩效、按阈值评估、判定 SOTA | `get_backtest_performance`、`evaluate_backtest`、`get_run_summary`、`compare_backtest_variants` |
-| Summarizer | 写 trace、产出 lesson、提交审阅 | `record_experiment`、`submit_strategy_for_review` |
+| Summarizer | 写 trace、产出 lesson、提交审阅 | `record_experiment`、`record_knowledge`、`close_run`、`submit_strategy_for_review` |
 
 ## 3. 阶段 0：初始化 run
 
@@ -45,12 +45,20 @@
 
 ### 4.1 Researcher：提出假设
 
-1. 调 `get_experiment_trace(runId, tail=5)` 与 `get_run_summary(runId)` 了解已试过的假设、各轮绩效与当前 SOTA。
-2. 首次或需要格式细节时调 `get_strategy_template`，返回 `data` 含：
+1. 按固定顺序收集上下文（不得跳步）：
+   a) `get_knowledge()`——跨 run 知识库全量（有可疑旋钮时追加 `get_knowledge(knobFilter)` 精查）
+   b) `get_run_summary(runId)`——当前 SOTA 与阈值差距
+   c) `get_experiment_trace(runId, tail=5)`——近期假设与 lesson；重点看上一轮的 `nextHypothesis`（可采纳、拒绝或改造）
+   d) `get_strategy_template`（首次或需要格式细节时）+ `list_factor_components`（假设涉及新因子/过滤组件时必查，确认组件真实存在）
+2. 假设自批判三问（critic 步骤，内部完成不另外调工具）：
+   - 与 trace 历史假设是否语义重复？（重复则放弃或改造）
+   - 是否有知识条目或历史实验证据支撑？（把引用写进 `hypothesisSource`）
+   - 是否可证伪？（必须指明预期改善的指标与方向）
+3. 首次或需要格式细节时调 `get_strategy_template`，返回 `data` 含：
    - `configPyFormat.requiredVariables`：`strategy_list` 的字段说明（name、cap_weight、hold_period、select_num、offset_list、rebalance_time、factor_list、filter_list、timing、buy_time、sell_time、split_order_amount 等）与 `backtest_name`
    - `timingExamples.availableSignals`：real_trading 现有可用择时信号清单
    - `directoryStructure`：策略库/因子库/信号库/外部数据/截面因子库 目录约定
-3. 输出本轮提案（内部记录，不写文件）：
+4. 输出本轮提案（内部记录，不写文件）：
    - `variantId`：`v{n}`（顺序递增，failed 的也占号）
    - `hypothesis`：一句话可证伪假设（机制 + 预期改善的指标方向）
    - `changes`：相对上一 variant 的具体改动（因子/参数/过滤条件）
@@ -111,13 +119,18 @@
 - `verdict`：`completed`（正常完成未刷新 SOTA）/ `sota`（刷新历史最优）/ `failed`（校验或回测失败）。
 - `failed` 时 `metrics`/`evaluation` 可缺省（fromLatestBacktest 可不传），但 `lesson` 必须写明失败原因摘要。
 - `complexity`（旋钮计数）：填 `factor_list` + `filter_list` + `filter_list_post` + `cross_sections` 的条目总数。SOTA 同分时**复杂度低者优先**（防过拟合的正则项），都不填才退回比年化。
-- **`lesson` 必填且要具体**（流程要求；工具 schema 层面是 optional，靠自觉不靠报错）：哪个指标未达、差距多少、下一步假设方向。它是进化循环的核心载体。
+- **`lesson` 必填且要具体**：哪个指标未达、差距多少、下一步假设方向。它是进化循环的核心载体。占位文本（「待回填」「TBD」等）会被工具直接拒绝（见下条）。
+- `basedOn`：本轮 config 不是从上一 variant 演进、而是分叉自更早 variant 时必填（如 v5 基于 v3 而非 v4），保持 trace 可归因。
+- `hypothesisSource`：假设来源引用——`knowledge:<id>`（来自知识库）/ `trace:<runId>/<variantId>`（来自历史实验）/ `none`（全新探索，需更强理由）。
+- `nextHypothesis`：预埋给下一轮的假设种子（对应 RD-Agent 反馈阶段的 new_hypothesis），写清建议验证什么、为什么。
+- lesson 占位文本（「待回填」「TBD」等）会被工具拒绝；假设与历史高度相似时工具返回 warnings，需在 lesson 中说明与相似实验的差异。
 
 ### 4.6 循环退出
 
 - `evaluation.passed === true`（全部阈值达标）→ 提前退出循环。
 - 达到 `evolving_n` 轮 → 退出循环。
 - 连续 2 次回测失败 → 终止（见 4.3）。
+- **循环退出后必须 `close_run`**：达标→`achieved`（要求存在 SOTA）；放弃→`abandoned`；暂停→`paused`，均附一句话原因。放弃或暂停时，把本轮最重要的负面发现（哪个旋钮无效/恶化）写入 `record_knowledge`——负面知识与正面知识同等宝贵，防止后续 run 重复踩坑。
 
 ## 5. 收尾：样本外复核、恢复 SOTA 与提交人工审阅
 
@@ -162,8 +175,10 @@
 ## 8. 单轮调用序列示例（v2，假设 v1 已完成）
 
 ```
-get_experiment_trace(runId, tail=5)          # 了解历史
+get_knowledge()                               # 跨 run 知识库（提假设前必查）
+get_experiment_trace(runId, tail=5)          # 了解历史（含上轮 nextHypothesis）
 get_run_summary(runId)                        # 当前 SOTA
+list_factor_components()                      # 假设涉及新组件时确认存在性
 write_strategy_file(runId, "v2", "config.py", <含 backtest_name="{runId}_v2">)
 validate_strategy(configFilePath=.../runId/v2/config.py)   # valid=true
 import_strategy(configFilePath=.../runId/v2/config.py)     # 不传 capWeight

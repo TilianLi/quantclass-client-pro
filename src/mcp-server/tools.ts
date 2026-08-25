@@ -23,12 +23,16 @@ import {
 	performanceCsvToMetrics,
 } from "./backtest-evaluator.js"
 import { get, post, put } from "./client.js"
+import { listFactorComponents } from "./component-catalog.ts"
 import { checkFactorSource } from "./factor-check.js"
+import { getKnowledge, recordKnowledge } from "./knowledge-base.ts"
 import {
+	closeRun,
 	createResearchRun,
 	experimentEntrySchema,
 	getExperimentTrace,
 	getResearchBrief,
+	getRunStatuses,
 	getRunSummary,
 	recordExperiment,
 	researchBriefSchema,
@@ -1092,7 +1096,7 @@ export function registerTools(server: McpServer): void {
 	// 策略文件管理
 	server.tool(
 		"list_strategies",
-		"列出策略工作区下的所有 run 和 variant",
+		"列出策略工作区下的所有 run 和 variant；不传 runId 时附带 runStatus（各已关闭 run 的 status/closeReason）",
 		{
 			runId: z.string().optional().describe("可选：指定 run ID"),
 		},
@@ -1111,7 +1115,16 @@ export function registerTools(server: McpServer): void {
 				}
 				const runs = listRuns()
 				return {
-					content: [{ type: "text", text: JSON.stringify({ runs }, null, 2) }],
+					content: [
+						{
+							type: "text",
+							text: JSON.stringify(
+								{ runs, runStatus: getRunStatuses() },
+								null,
+								2,
+							),
+						},
+					],
 				}
 			} catch (error) {
 				return {
@@ -1580,7 +1593,7 @@ export function registerTools(server: McpServer): void {
 
 	server.tool(
 		"record_experiment",
-		"记录一次实验到 run 的 trace.jsonl（假设、变更、绩效、评估、结论、教训）。ts 缺省时自动填当前时间。fromLatestBacktest=true 时自动把最近一次回测的绩效数值填入 metrics（缺省时）、并把内核版本填入 kernelVersion（缺省时），避免手工誊抄。verdict 缺省时自动判定（validation 条目→completed；无 metrics/evaluation→failed；成为当前最优→sota，否则 completed）；complexity 缺省时自动从 variant 的 config.py 统计旋钮数；entry.type 支持 dev（默认，计入迭代预算与 SOTA）/ validation（终局样本外验证，不进 SOTA 与趋势）。brief 含 evolving_n 时响应附带 budget（used/remaining）。指标口径：calmar_ratio 为规范名，sharpe_ratio 是兼容别名。注意：brief 配置 walkforward 后，带绩效的 dev 条目必须经 run_dev_walkforward 写入（含分窗口明细），本工具仅放行无绩效的失败记录。",
+		"记录一次实验到 run 的 trace.jsonl（假设、变更、绩效、评估、结论、教训）。ts 缺省时自动填当前时间。fromLatestBacktest=true 时自动把最近一次回测的绩效数值填入 metrics（缺省时）、并把内核版本填入 kernelVersion（缺省时），避免手工誊抄。verdict 缺省时自动判定（validation 条目→completed；无 metrics/evaluation→failed；成为当前最优→sota，否则 completed）；complexity 缺省时自动从 variant 的 config.py 统计旋钮数；entry.type 支持 dev（默认，计入迭代预算与 SOTA）/ validation（终局样本外验证，不进 SOTA 与趋势）。brief 含 evolving_n 时响应附带 budget（used/remaining）。指标口径：calmar_ratio 为规范名，sharpe_ratio 是兼容别名。注意：brief 配置 walkforward 后，带绩效的 dev 条目必须经 run_dev_walkforward 写入（含分窗口明细），本工具仅放行无绩效的失败记录。entry 新增可选字段：basedOn（分叉父 variantId）、hypothesisSource（假设来源引用，推荐 knowledge:<id>/trace:<runId>/<variantId>）、nextHypothesis（预埋下一轮假设种子）。lesson 传占位文本（待回填/TBD 等）会被拒绝；假设与历史高度相似时返回 warnings（不阻断）。",
 		{
 			runId: z.string().describe("Run ID"),
 			entry: experimentEntrySchema.describe("实验记录"),
@@ -1686,6 +1699,125 @@ export function registerTools(server: McpServer): void {
 						{
 							type: "text",
 							text: `汇总 run 失败: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
+					isError: true,
+				}
+			}
+		},
+	)
+
+	server.tool(
+		"record_knowledge",
+		"记录一条跨 run 知识到 workspace 级 knowledge.jsonl（旋钮级实验发现的结构化沉淀，只增不改）。证据链 evidence 必填。负面发现（旋钮恶化）同样值得记录。",
+		{
+			knob: z.string().describe("旋钮/组件标识，如 波动.波动率20 过滤阈值"),
+			change: z.string().describe("做了什么变更，如 pct:<=0.25 → 0.20"),
+			effect: z
+				.string()
+				.describe("效果（含方向与幅度），如 最劣窗口回撤 -0.1pp，年化 +0.19pp"),
+			evidence: z
+				.array(
+					z.object({
+						runId: z.string(),
+						from: z.string().optional(),
+						to: z.string().optional(),
+					}),
+				)
+				.describe("证据链，如 [{runId:'run-calmar-001',from:'v3',to:'v5'}]"),
+			regime: z.string().optional().describe("生效/失效的市场环境"),
+			tags: z.array(z.string()).optional(),
+		},
+		async (args) => {
+			try {
+				const result = recordKnowledge(args)
+				return {
+					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+				}
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `记录知识失败: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
+					isError: true,
+				}
+			}
+		},
+	)
+
+	server.tool(
+		"get_knowledge",
+		"读取跨 run 知识库（knowledge.jsonl）。knobFilter 按旋钮名子串过滤。Researcher 提假设前必须先调用本工具。",
+		{
+			knobFilter: z.string().optional().describe("按旋钮名子串过滤"),
+		},
+		async ({ knobFilter }) => {
+			try {
+				const result = getKnowledge(knobFilter)
+				return {
+					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+				}
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `读取知识库失败: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
+					isError: true,
+				}
+			}
+		},
+	)
+
+	server.tool(
+		"close_run",
+		"关闭研究 run 并记录关闭决策（写入 brief.json 的 status/closedAt/closeReason）。status: achieved（要求存在 SOTA）/ abandoned / paused。循环退出后必须调用本工具，杜绝烂尾 run。",
+		{
+			runId: z.string().describe("Run ID"),
+			status: z.enum(["achieved", "abandoned", "paused"]).describe("关闭状态"),
+			reason: z.string().describe("关闭原因（必填，一句话）"),
+		},
+		async ({ runId, status, reason }) => {
+			try {
+				const result = closeRun(runId, status, reason)
+				return {
+					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+				}
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `关闭 run 失败: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
+					isError: true,
+				}
+			}
+		},
+	)
+
+	server.tool(
+		"list_factor_components",
+		"枚举 real_trading 因子库/截面因子库的可用组件（类目 → 因子名列表）。提假设前用于确认因子真实存在，避免假设落到不存在的组件上。",
+		{},
+		async () => {
+			try {
+				const result = listFactorComponents()
+				return {
+					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+				}
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `枚举因子组件失败: ${error instanceof Error ? error.message : String(error)}`,
 						},
 					],
 					isError: true,

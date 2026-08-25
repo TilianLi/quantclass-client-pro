@@ -1,5 +1,6 @@
 import assert from "node:assert"
 import {
+	appendFileSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
@@ -14,9 +15,11 @@ const TMP = mkdtempSync(join(tmpdir(), "qc-research-"))
 process.env.QUANTCLASS_AGENT_WORKSPACE = TMP
 
 const {
+	closeRun,
 	createResearchRun,
 	recordExperiment,
 	getExperimentTrace,
+	getRunStatuses,
 	getRunSummary,
 } = await import("../../src/mcp-server/research-run.ts")
 
@@ -405,6 +408,118 @@ strategy_list = [
 			summary.trends.calmar_ratio.map((t) => t.value),
 			[0.6],
 		)
+	})
+
+	it("accepts basedOn/nextHypothesis/hypothesisSource and echoes them back", () => {
+		const { entry } = recordExperiment("run-schema", {
+			variantId: "v2",
+			basedOn: "v1",
+			hypothesis: "收紧波动率过滤压回撤",
+			hypothesisSource: "knowledge:k-2026-07-31-001",
+			lesson: "W3 回撤 -22.4→-21.88，方向成立但幅度有限",
+			nextHypothesis: "扩大持股数 20→30 分散特质风险",
+			verdict: "completed",
+		})
+		assert.strictEqual(entry.basedOn, "v1")
+		assert.strictEqual(entry.nextHypothesis, "扩大持股数 20→30 分散特质风险")
+		assert.strictEqual(entry.hypothesisSource, "knowledge:k-2026-07-31-001")
+	})
+
+	it("rejects placeholder lesson on write but still reads legacy placeholder entries", () => {
+		assert.throws(
+			() =>
+				recordExperiment("run-schema", {
+					variantId: "v3",
+					hypothesis: "x",
+					lesson: "待回填",
+				}),
+			/占位/,
+		)
+		assert.throws(
+			() =>
+				recordExperiment("run-schema", {
+					variantId: "v3",
+					hypothesis: "x",
+					lesson: "TBD",
+				}),
+			/占位/,
+		)
+		appendFileSync(
+			join(TMP, "run-schema", "trace.jsonl"),
+			`${JSON.stringify({ variantId: "v9", hypothesis: "legacy", lesson: "待回填" })}\n`,
+		)
+		const { entries } = getExperimentTrace("run-schema")
+		assert.ok(
+			entries.some((e) => e.variantId === "v9" && e.lesson === "待回填"),
+		)
+	})
+
+	it("warns on near-duplicate hypothesis without blocking", () => {
+		recordExperiment("run-dup", {
+			variantId: "v1",
+			hypothesis: "收紧低波动过滤至0.25可压降回撤",
+			lesson: "无效",
+		})
+		const res = recordExperiment("run-dup", {
+			variantId: "v2",
+			hypothesis: "收紧低波动过滤至0.25以压降回撤",
+			lesson: "仍无效",
+		})
+		assert.ok(res.warnings?.some((w) => w.includes("相似")))
+		const res2 = recordExperiment("run-dup", {
+			variantId: "v3",
+			hypothesis: "改用反转因子叠加小市值暴露",
+			lesson: "观察",
+		})
+		assert.ok(!res2.warnings || res2.warnings.length === 0)
+	})
+
+	it("close_run lifecycle: pause/achieve rules", () => {
+		createResearchRun("run-lc", BRIEF)
+		const closed = closeRun("run-lc", "abandoned", "基线差距过大，转向其他配方")
+		assert.strictEqual(closed.status, "abandoned")
+		assert.throws(() => closeRun("run-lc", "achieved", "达标"), /SOTA/)
+		recordExperiment("run-lc", {
+			variantId: "v1",
+			hypothesis: "h",
+			metrics: { annual_return_pct: 5 },
+			evaluation: { passed: false, score: 0 },
+			verdict: "completed",
+			lesson: "差距大",
+		})
+		assert.throws(() => closeRun("run-lc", "achieved", "达标"), /SOTA/)
+		recordExperiment("run-lc", {
+			variantId: "v2",
+			hypothesis: "h2",
+			metrics: { annual_return_pct: 20 },
+			evaluation: { passed: true, score: 1 },
+			verdict: "sota",
+			lesson: "达标",
+		})
+		const ok = closeRun("run-lc", "achieved", "全部阈值达标")
+		assert.strictEqual(ok.status, "achieved")
+		assert.ok(ok.closedAt)
+		assert.strictEqual(getRunStatuses()["run-lc"].status, "achieved")
+		closeRun("run-lc", "paused", "阶段性暂停")
+		assert.strictEqual(getRunStatuses()["run-lc"].status, "paused")
+		assert.strictEqual(getRunStatuses()["run-lc"].closeReason, "阶段性暂停")
+		assert.throws(() => closeRun("run-nope", "paused", "x"), /不存在/)
+	})
+
+	it("close_run rejects runs without brief.json and does not poison the run", () => {
+		recordExperiment("run-nobrief", {
+			variantId: "v1",
+			hypothesis: "无 brief 的 run",
+			lesson: "仅 recordExperiment 创建的目录",
+		})
+		assert.throws(() => closeRun("run-nobrief", "paused", "x"), /brief\.json/)
+		// closeRun 不得兜底写残缺 brief（会锁死 readBriefFile），run 仍可正常记录
+		recordExperiment("run-nobrief", {
+			variantId: "v2",
+			hypothesis: "closeRun 失败后继续记录",
+			lesson: "未被锁死",
+		})
+		assert.strictEqual(getExperimentTrace("run-nobrief").total, 2)
 	})
 })
 

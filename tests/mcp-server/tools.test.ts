@@ -128,6 +128,10 @@ describe("mcp tools integration", () => {
 		assert.ok(names.includes("record_experiment"))
 		assert.ok(names.includes("get_experiment_trace"))
 		assert.ok(names.includes("get_run_summary"))
+		assert.ok(names.includes("record_knowledge"))
+		assert.ok(names.includes("get_knowledge"))
+		assert.ok(names.includes("close_run"))
+		assert.ok(names.includes("list_factor_components"))
 	})
 
 	it("runs research workflow via MCP", async () => {
