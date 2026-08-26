@@ -117,3 +117,10 @@ workspace/
 
 # Extracted executable artifacts
 *.exe_extracted/
+
+# Local data & tooling (not product code)
+downloads/
+mcp-email-163/
+quantclass-strategy-fetch/
+quantclass-strategy-fetch.skill
+build_variants.py
