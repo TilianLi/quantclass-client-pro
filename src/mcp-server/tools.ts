@@ -8,7 +8,7 @@
  * See the LICENSE file and https://mariadb.com/bsl11/
  */
 
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync } from "node:fs"
 import { join } from "node:path"
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { z } from "zod"
@@ -17,13 +17,14 @@ import {
 	computeYearlyReturns,
 	parseEquityRows,
 } from "./backtest-diagnostics.js"
-import {
-	type BacktestPerformance,
-	evaluateBacktest,
-	performanceCsvToMetrics,
-} from "./backtest-evaluator.js"
+import { evaluateBacktest } from "./backtest-evaluator.js"
 import { get, post, put } from "./client.js"
+import { resolveVariantPerformances } from "./compare-variants.js"
 import { listFactorComponents } from "./component-catalog.ts"
+import {
+	readDevWalkforwardJob,
+	startDevWalkforwardJob,
+} from "./dev-walkforward-job.js"
 import { checkFactorSource } from "./factor-check.js"
 import { getKnowledge, recordKnowledge } from "./knowledge-base.ts"
 import {
@@ -48,17 +49,13 @@ import {
 } from "./strategy-files.js"
 import { validateStrategy } from "./strategy-validator.js"
 import {
+	backtestWindowToConfigBody,
 	buildValidationWindow,
 	clearValidationState,
 	priorConfigToRestoreBody,
 	readValidationState,
 	saveValidationState,
 } from "./validation-gate.js"
-import {
-	type WalkforwardWindowResult,
-	type WalkforwardWindowSpec,
-	summarizeWalkforward,
-} from "./walkforward-eval.js"
 
 // 最近一次成功回测的信息缓存（供 record_experiment 的 fromLatestBacktest 使用）
 let lastBacktestInfo: {
@@ -437,12 +434,23 @@ export function registerTools(server: McpServer): void {
 
 	server.tool(
 		"run_backtest",
-		"执行策略回测。根据当前策略库类型自动选择内核（选股→aqua，仓位管理→zeus）。回测是长耗时操作（可能几分钟到几十分钟），会阻塞直到回测完成。回测期间不能同时运行实盘。建议在非交易时段使用。成功响应包含 backtestName、kernelVersion、durationMs、resultPath；未产出结果（内核失败）返回错误。",
-		{},
-		async () => {
+		"执行策略回测。根据当前策略库类型自动选择内核（选股→aqua，仓位管理→zeus）。回测是长耗时操作（可能几分钟到几十分钟），会阻塞直到回测完成。回测期间不能同时运行实盘。建议在非交易时段使用。仓位管理库(zeus)默认会融合回测全部 weight>0 的策略组；传 only_backtest_name=true 可临时将其他组权重置 0、只回测当前 backtest_name 策略组，结束后自动恢复原权重。成功响应包含 backtestName、kernelVersion、durationMs、resultPath；未产出结果（内核失败）返回错误。",
+		{
+			only_backtest_name: z
+				.boolean()
+				.optional()
+				.describe(
+					"仅回测当前 backtest_name 策略组：回测前临时将库内其他策略组权重置 0（三层同步），结束后无论成败自动恢复原权重。仅仓位管理库(zeus)有效，默认 false",
+				),
+		},
+		async ({ only_backtest_name }) => {
 			try {
 				// 回测是长耗时操作，设置 30 分钟超时
-				const result = await post("/mcp/backtest/run", undefined, 1_800_000)
+				const result = await post(
+					"/mcp/backtest/run",
+					only_backtest_name ? { only_backtest_name } : undefined,
+					1_800_000,
+				)
 				const data = (result as Record<string, unknown>)?.data as
 					| Record<string, unknown>
 					| undefined
@@ -621,7 +629,7 @@ export function registerTools(server: McpServer): void {
 
 	server.tool(
 		"run_dev_walkforward",
-		"执行一次 dev 迭代的 walkforward 稳健性检验：读取 run 的 brief.walkforward.windows，快照当前回测配置 → 逐窗口串行回测并按 brief.thresholds 逐窗口评估 → 恢复原回测配置 → 按最劣窗口口径（score 升序 → 年化升序，失败窗口计 0）汇总并写入一条 type=dev 的 trace 记录（消耗 1 轮迭代预算）。brief 未配置 walkforward 时报错（走 record_experiment 旧路径）。任何窗口失败则该窗口 score 计 0；全部窗口失败不写 trace。注意：每窗口约需数分钟，全部串行同步执行。",
+		"启动一次 dev 迭代的 walkforward 稳健性检验（异步 job，不阻塞）：前置校验（brief.walkforward 存在、迭代预算未耗尽、无进行中 job）→ 快照当前回测配置 → 落盘 job 文件并立即返回 jobId。窗口循环在后台执行：逐窗口切配置 → /mcp/backtest/run-async + 轮询 task → 按 brief.thresholds 逐窗口评估，每窗口进度写入 <runId>/dev-walkforward-job.json（用 get_dev_walkforward_job 轮询）。全部完成后恢复原回测配置，并按最劣窗口口径（score 升序 → 年化升序，失败窗口计 0）写入一条 type=dev 的 trace 记录（消耗 1 轮迭代预算）；全部窗口失败则不写 trace、job status=error。",
 		{
 			runId: z.string().describe("Run ID"),
 			variantId: z.string().describe("被检验的 variant ID"),
@@ -631,148 +639,48 @@ export function registerTools(server: McpServer): void {
 		},
 		async ({ runId, variantId, hypothesis, changes, lesson }) => {
 			try {
-				const brief = getResearchBrief(runId)
-				if (!brief) {
-					throw new Error(`run 不存在或无 brief.json: ${runId}`)
-				}
-				if (!brief.walkforward) {
-					throw new Error(
-						`brief.json 未配置 walkforward（runId=${runId}），请使用 record_experiment 记录单窗口实验`,
-					)
-				}
-
-				// 快照当前回测配置；无论成败，流程结束后恢复（finally）
-				const configResp = (await get("/mcp/backtest/config")) as Record<
-					string,
-					unknown
-				>
-				const prior = (configResp?.data ?? {}) as Record<string, unknown>
-
-				const results: WalkforwardWindowResult[] = []
-				try {
-					for (const w of brief.walkforward.windows) {
-						const window: WalkforwardWindowSpec = {
-							start_date: w.start_date,
-							end_date: w.end_date ?? null,
-						}
-						if (w.initial_cash !== undefined)
-							window.initial_cash = w.initial_cash
-						const body: Record<string, unknown> = { ...window }
-						try {
-							await put("/mcp/backtest/config", body)
-							const runResp = (await post(
-								"/mcp/backtest/run",
-								undefined,
-								1_800_000,
-							)) as Record<string, unknown>
-							const runData = runResp?.data as
-								| Record<string, unknown>
-								| undefined
-							if (runData) {
-								lastBacktestInfo = {
-									at: new Date().toISOString(),
-									backtestName: runData.backtestName as string | undefined,
-									kernel: runData.kernel as string | undefined,
-									kernelVersion: runData.kernelVersion as string | undefined,
-									libraryType: runData.libraryType as string | undefined,
-								}
-							}
-							const perf = (await get("/mcp/backtest/performance")) as Record<
-								string,
-								unknown
-							>
-							const parsed = (perf?.data as Record<string, unknown>)?.parsed as
-								| Record<string, number>
-								| undefined
-							if (!parsed) {
-								throw new Error("回测成功但未产出绩效数据")
-							}
-							const r = evaluateBacktest(
-								[{ variantId, ...parsed }],
-								brief.thresholds,
-							)
-							results.push({
-								window,
-								ok: true,
-								metrics: parsed,
-								evaluation: { passed: r.passed, score: r.score },
-							})
-						} catch (error) {
-							results.push({
-								window,
-								ok: false,
-								error: error instanceof Error ? error.message : String(error),
-							})
-						}
-					}
-				} finally {
-					// 恢复原回测配置：恢复失败静默，不掩盖主流程结果
-					await put(
-						"/mcp/backtest/config",
-						priorConfigToRestoreBody(prior),
-					).catch(() => {})
-				}
-
-				if (results.every((r) => !r.ok)) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: JSON.stringify(
-									{
-										error: "所有窗口回测均失败，未写 trace（回测配置已恢复）",
-										results,
-									},
-									null,
-									2,
-								),
-							},
-						],
-						isError: true,
-					}
-				}
-
-				const summary = summarizeWalkforward(results)
-				const recorded = recordExperiment(runId, {
+				const result = await startDevWalkforwardJob({
+					runId,
 					variantId,
 					hypothesis,
 					changes,
 					lesson,
-					metrics: summary.metrics,
-					evaluation: { passed: summary.passed, score: summary.score },
-					windows: results,
-					worstWindow: summary.worstWindow ?? undefined,
-					kernelVersion: lastBacktestInfo?.kernelVersion,
 				})
-
 				return {
-					content: [
-						{
-							type: "text",
-							text: JSON.stringify(
-								{
-									results,
-									worstWindow: summary.worstWindow,
-									aggregate: {
-										score: summary.score,
-										passed: summary.passed,
-									},
-									configRestored: true,
-									entry: recorded.entry,
-									budget: recorded.budget,
-								},
-								null,
-								2,
-							),
-						},
-					],
+					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
 				}
 			} catch (error) {
 				return {
 					content: [
 						{
 							type: "text",
-							text: `执行 dev walkforward 失败: ${error instanceof Error ? error.message : String(error)}`,
+							text: `启动 dev walkforward 失败: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
+					isError: true,
+				}
+			}
+		},
+	)
+
+	server.tool(
+		"get_dev_walkforward_job",
+		"查询 run_dev_walkforward 启动的异步 job 进度：读取 <runId>/dev-walkforward-job.json，返回 status(running/success/error)、当前窗口序号、各窗口 metrics/evaluation、完成后的 traceEntry 与 budget。无此 run 的 job 时报错。",
+		{
+			runId: z.string().describe("Run ID"),
+		},
+		async ({ runId }) => {
+			try {
+				const job = readDevWalkforwardJob(runId)
+				return {
+					content: [{ type: "text", text: JSON.stringify(job, null, 2) }],
+				}
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `查询 dev walkforward job 失败: ${error instanceof Error ? error.message : String(error)}`,
 						},
 					],
 					isError: true,
@@ -1387,7 +1295,7 @@ export function registerTools(server: McpServer): void {
 
 	server.tool(
 		"compare_backtest_variants",
-		"读取多个 variant 的策略评价 CSV，按阈值对比并返回最优 variant（score→年化→复杂度语义，与 evaluate_backtest 一致）。返回 performances/evaluation/errors/validationWarnings（config 校验未通过时对外可见）。指标中的 calmar_ratio 为「年化收益/回撤比」口径，sharpe_ratio 是其兼容镜像。",
+		'对比多个 variant 的回测绩效，按阈值返回最优 variant（score→年化→复杂度语义，与 evaluate_backtest 一致）。指标来源：trace.jsonl 有带 metrics 的 dev 记录时优先取最近一次 dev 条目（walkforward 最劣窗口口径，与 get_run_summary 的 SOTA 一致，标注 source="trace"）；无记录才回退读 策略评价.csv（内核按名覆盖写的残留口径，标注 source="csv"）。返回 performances/evaluation/errors/validationWarnings（config 校验未通过时对外可见）。指标中的 calmar_ratio 为「年化收益/回撤比」口径，sharpe_ratio 是其兼容镜像。',
 		{
 			runId: z.string().describe("Run ID，例如 run-momentum-002"),
 			variantIds: z
@@ -1413,48 +1321,8 @@ export function registerTools(server: McpServer): void {
 		},
 		async ({ runId, variantIds, thresholds, quantDataPath }) => {
 			try {
-				const dataRoot =
-					quantDataPath ||
-					process.env.ALL_DATA_PATH ||
-					"D:/QuantClassSpace/QuantData"
-				const workspaceRoot = getWorkspaceRoot()
-				const performances: BacktestPerformance[] = []
-				const errors: string[] = []
-				const validationWarnings: string[] = []
-
-				for (const variantId of variantIds) {
-					const configPath = join(workspaceRoot, runId, variantId, "config.py")
-					if (!existsSync(configPath)) {
-						errors.push(`config.py 不存在: ${variantId}`)
-						continue
-					}
-					const validation = validateStrategy(configPath)
-					const backtestName =
-						(validation.extracted?.backtest_name as string) ||
-						`${runId}_${variantId}`
-					if (!validation.valid) {
-						// 校验失败不阻断对比，但必须对外可见（此前静默吞掉，
-						// 配置真出错时会产出错误的对比结论）
-						validationWarnings.push(
-							`${variantId}（backtest_name 取 ${backtestName}）: ${validation.errors.join("；")}`,
-						)
-					}
-					const csvPath = join(
-						dataRoot,
-						"real_trading",
-						"data",
-						"回测结果",
-						backtestName,
-						"策略评价.csv",
-					)
-					if (!existsSync(csvPath)) {
-						errors.push(`策略评价.csv 不存在: ${variantId} (${backtestName})`)
-						continue
-					}
-					const csvText = readFileSync(csvPath, "utf-8")
-					performances.push(performanceCsvToMetrics(variantId, csvText))
-				}
-
+				const { performances, errors, validationWarnings } =
+					resolveVariantPerformances(runId, variantIds, quantDataPath)
 				const evaluation = evaluateBacktest(performances, thresholds)
 				return {
 					content: [
@@ -1566,7 +1434,7 @@ export function registerTools(server: McpServer): void {
 
 	server.tool(
 		"create_research_run",
-		"创建研究 run：在工作区写入 brief.json（研究目标、达标阈值、回测区间、进化轮数；可选 walkforward 多窗口配置，配置后 dev 实验强制走 run_dev_walkforward 最劣窗口口径）。runId 已存在则报错，不会覆盖。",
+		"创建研究 run：在工作区写入 brief.json（研究目标、达标阈值、回测区间、进化轮数；可选 walkforward 多窗口配置，配置后 dev 实验强制走 run_dev_walkforward 最劣窗口口径）。runId 已存在则报错，不会覆盖。brief 含 backtest 窗口时会自动同步到客户端回测配置（响应含 configSync；客户端不可达时降级为 warning，不影响 run 创建）。",
 		{
 			runId: z.string().describe("Run ID，例如 run-momentum-001"),
 			brief: researchBriefSchema.describe("研究任务书"),
@@ -1574,8 +1442,31 @@ export function registerTools(server: McpServer): void {
 		async ({ runId, brief }) => {
 			try {
 				const result = createResearchRun(runId, brief)
+				const response: Record<string, unknown> = { ...result }
+				// brief.backtest 自动同步到客户端回测配置，避免首轮回测用错窗口/股票池；
+				// 客户端不可达时降级为 warning，run 已创建不回滚
+				if (result.brief.backtest) {
+					try {
+						const putResp = (await put(
+							"/mcp/backtest/config",
+							backtestWindowToConfigBody(result.brief.backtest),
+						)) as Record<string, unknown>
+						response.configSync = {
+							applied: true,
+							updated: (putResp?.data as Record<string, unknown> | undefined)
+								?.updated,
+						}
+					} catch (error) {
+						response.configSync = {
+							applied: false,
+							error: error instanceof Error ? error.message : String(error),
+						}
+						response.warning =
+							"brief.backtest 配置同步失败（客户端不可达？），请手动 set_backtest_config 校正"
+					}
+				}
 				return {
-					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+					content: [{ type: "text", text: JSON.stringify(response, null, 2) }],
 				}
 			} catch (error) {
 				return {
@@ -1593,7 +1484,7 @@ export function registerTools(server: McpServer): void {
 
 	server.tool(
 		"record_experiment",
-		"记录一次实验到 run 的 trace.jsonl（假设、变更、绩效、评估、结论、教训）。ts 缺省时自动填当前时间。fromLatestBacktest=true 时自动把最近一次回测的绩效数值填入 metrics（缺省时）、并把内核版本填入 kernelVersion（缺省时），避免手工誊抄。verdict 缺省时自动判定（validation 条目→completed；无 metrics/evaluation→failed；成为当前最优→sota，否则 completed）；complexity 缺省时自动从 variant 的 config.py 统计旋钮数；entry.type 支持 dev（默认，计入迭代预算与 SOTA）/ validation（终局样本外验证，不进 SOTA 与趋势）。brief 含 evolving_n 时响应附带 budget（used/remaining）。指标口径：calmar_ratio 为规范名，sharpe_ratio 是兼容别名。注意：brief 配置 walkforward 后，带绩效的 dev 条目必须经 run_dev_walkforward 写入（含分窗口明细），本工具仅放行无绩效的失败记录。entry 新增可选字段：basedOn（分叉父 variantId）、hypothesisSource（假设来源引用，推荐 knowledge:<id>/trace:<runId>/<variantId>）、nextHypothesis（预埋下一轮假设种子）。lesson 传占位文本（待回填/TBD 等）会被拒绝；假设与历史高度相似时返回 warnings（不阻断）。",
+		"记录一次实验到 run 的 trace.jsonl（假设、变更、绩效、评估、结论、教训）。ts 缺省时自动填当前时间。fromLatestBacktest=true 时自动把最近一次回测的绩效数值填入 metrics（缺省时）、并把内核版本填入 kernelVersion（缺省时），避免手工誊抄。verdict 缺省时自动判定（validation 条目→completed；无 metrics/evaluation→failed；成为当前最优→sota，否则 completed）；complexity 缺省时自动从 variant 的 config.py 统计旋钮数；entry.type 支持 dev（默认，计入迭代预算与 SOTA）/ validation（终局样本外验证，不进 SOTA 与趋势）。brief 含 evolving_n 时响应附带 budget（used/remaining）；迭代预算是硬闸门——dev 条目达 evolving_n 上限后写入前直接报错（提示 close_run 或提高预算），validation 条目不受限。指标口径：calmar_ratio 为规范名，sharpe_ratio 是兼容别名。注意：brief 配置 walkforward 后，带绩效的 dev 条目必须经 run_dev_walkforward 写入（含分窗口明细），本工具仅放行无绩效的失败记录。entry 新增可选字段：basedOn（分叉父 variantId）、hypothesisSource（假设来源引用，推荐 knowledge:<id>/trace:<runId>/<variantId>）、nextHypothesis（预埋下一轮假设种子）。lesson 传占位文本（待回填/TBD 等）会被拒绝；假设与历史高度相似时返回 warnings（不阻断）。",
 		{
 			runId: z.string().describe("Run ID"),
 			entry: experimentEntrySchema.describe("实验记录"),
@@ -1776,15 +1667,19 @@ export function registerTools(server: McpServer): void {
 
 	server.tool(
 		"close_run",
-		"关闭研究 run 并记录关闭决策（写入 brief.json 的 status/closedAt/closeReason）。status: achieved（要求存在 SOTA）/ abandoned / paused。循环退出后必须调用本工具，杜绝烂尾 run。",
+		"关闭研究 run 并记录关闭决策（写入 brief.json 的 status/closedAt/closeReason）。status: achieved（要求存在 SOTA）/ abandoned / paused。已关闭的 run 默认拒绝再次关闭（幂等保护），确需改判时显式传 force=true，响应回显被覆盖的 previousStatus/previousCloseReason。循环退出后必须调用本工具，杜绝烂尾 run。",
 		{
 			runId: z.string().describe("Run ID"),
 			status: z.enum(["achieved", "abandoned", "paused"]).describe("关闭状态"),
 			reason: z.string().describe("关闭原因（必填，一句话）"),
+			force: z
+				.boolean()
+				.optional()
+				.describe("已关闭的 run 再次关闭（改判）时显式传 true"),
 		},
-		async ({ runId, status, reason }) => {
+		async ({ runId, status, reason, force }) => {
 			try {
-				const result = closeRun(runId, status, reason)
+				const result = closeRun(runId, status, reason, force)
 				return {
 					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
 				}
@@ -1885,11 +1780,17 @@ export function registerTools(server: McpServer): void {
 
 	server.tool(
 		"run_validation",
-		"启动 validation 闸门：读取 run 的 brief.validation 窗口，快照当前回测配置 → 切换到 validation 窗口 → 启动异步回测（返回 taskId，用 get_backtest_task 轮询）。回测成功后必须调用 complete_validation 恢复原配置并记录样本外结果。brief 未定义 validation 窗口、或已有进行中的 validation 时报错。",
+		"启动 validation 闸门：读取 run 的 brief.validation 窗口，校验当前回测策略与待验证 variant 一致 → 快照当前回测配置 → 切换到 validation 窗口 → 启动异步回测（返回 taskId，用 get_backtest_task 轮询）。回测成功后必须调用 complete_validation 恢复原配置并记录样本外结果。brief 未定义 validation 窗口、或已有进行中的 validation 时报错。",
 		{
 			runId: z.string().describe("Run ID"),
+			variantId: z
+				.string()
+				.optional()
+				.describe(
+					"待验证的 variant ID（缺省取当前 SOTA）。当前回测策略与期望不一致时报错，防止样本外验证跑在错误策略上",
+				),
 		},
-		async ({ runId }) => {
+		async ({ runId, variantId }) => {
 			try {
 				const brief = getResearchBrief(runId)
 				if (!brief) {
@@ -1906,6 +1807,41 @@ export function registerTools(server: McpServer): void {
 					unknown
 				>
 				const prior = (configResp?.data ?? {}) as Record<string, unknown>
+
+				// 校验当前回测策略是否为待验证 variant（缺省取 SOTA），
+				// 防止忘记 import_strategy 时样本外验证静默跑在旧策略上
+				const expectedVariantId =
+					variantId ?? getRunSummary(runId).sota?.variantId
+				let variantWarning: string | undefined
+				if (expectedVariantId) {
+					let expectedName = `${runId}_${expectedVariantId}`
+					try {
+						const configPath = join(
+							getWorkspaceRoot(),
+							runId,
+							expectedVariantId,
+							"config.py",
+						)
+						if (existsSync(configPath)) {
+							const validation = validateStrategy(configPath)
+							expectedName =
+								(validation.extracted?.backtest_name as string) || expectedName
+						}
+					} catch {
+						// 配置读取/解析失败时回退默认命名比对
+					}
+					const currentName =
+						typeof prior.backtestName === "string" ? prior.backtestName : ""
+					if (currentName !== expectedName) {
+						throw new Error(
+							`当前回测策略为 ${currentName || "(未设置)"}，与待验证 variant 期望的 ${expectedName} 不一致；请先 import_strategy(<config 路径>) 并设置权重后再 run_validation`,
+						)
+					}
+				} else {
+					variantWarning =
+						"无法确定待验证 variant（无 SOTA 且未传 variantId），请确认当前回测策略即为目标策略"
+				}
+
 				await put("/mcp/backtest/config", window)
 				let taskId: string
 				try {
@@ -1938,6 +1874,8 @@ export function registerTools(server: McpServer): void {
 									taskId,
 									validationWindow: window,
 									priorConfigSaved: true,
+									validatedVariantId: expectedVariantId,
+									warning: variantWarning,
 									next: "用 get_backtest_task 轮询；成功后调用 complete_validation 恢复原配置并记录样本外结果",
 								},
 								null,

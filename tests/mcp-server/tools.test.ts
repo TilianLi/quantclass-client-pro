@@ -132,6 +132,8 @@ describe("mcp tools integration", () => {
 		assert.ok(names.includes("get_knowledge"))
 		assert.ok(names.includes("close_run"))
 		assert.ok(names.includes("list_factor_components"))
+		assert.ok(names.includes("run_dev_walkforward"))
+		assert.ok(names.includes("get_dev_walkforward_job"))
 	})
 
 	it("runs research workflow via MCP", async () => {

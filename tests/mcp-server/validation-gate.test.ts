@@ -79,7 +79,7 @@ describe("validation-gate", () => {
 		)
 	})
 
-	it("maps prior config (camelCase) back to restore body (snake_case)", () => {
+	it("maps prior config (camelCase) back to restore body (snake_case), filters normalized to boolean", () => {
 		const body = priorConfigToRestoreBody({
 			initialCash: 1000000,
 			startDate: "2023-01-01",
@@ -88,14 +88,22 @@ describe("validation-gate", () => {
 			filterCyb: "0",
 			filterBj: "1",
 		})
+		// filter_* 回传前归一为 boolean（与主进程存储口径一致），
+		// 避免字符串 "0" 被 Python 按真值误判为「过滤」
 		assert.deepStrictEqual(body, {
 			initial_cash: 1000000,
 			start_date: "2023-01-01",
 			end_date: "2024-12-31",
-			filter_kcb: "1",
-			filter_cyb: "0",
-			filter_bj: "1",
+			filter_kcb: true,
+			filter_cyb: false,
+			filter_bj: true,
 		})
+		// boolean 输入原样归一
+		const bodyBool = priorConfigToRestoreBody({
+			filterKcb: true,
+			filterCyb: false,
+		})
+		assert.deepStrictEqual(bodyBool, { filter_kcb: true, filter_cyb: false })
 		// endDate 为 null（回测至今）时必须显式还原为 null，而不是省略
 		const body2 = priorConfigToRestoreBody({
 			startDate: "2025-01-01",

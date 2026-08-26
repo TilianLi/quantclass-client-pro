@@ -366,52 +366,219 @@ async function findBacktestArtifact(
 }
 
 /**
+ * 三层同步设置策略组资金占比：
+ * config.json（electron-store）、renderer localStorage（界面与启动全量同步源）、
+ * real_market_25.json（zeus 实际读取的策略注册表）。
+ * assignments 按组名指定目标权重；返回匹配组数与各层同步情况。
+ */
+async function applyStrategyWeights(
+	libraryType: string,
+	assignments: Array<{ name: string; weight: number }>,
+): Promise<{
+	matched: number
+	localStorageUpdated: boolean
+	rStoreSlots: number
+}> {
+	const storeKey =
+		libraryType === "pos" ? "pos_mgmt.strategies" : "select_stock.strategy_list"
+	const list = (store.get(storeKey, []) as Array<Record<string, unknown>>) ?? []
+	const weightByName = new Map(assignments.map((a) => [a.name, a.weight]))
+
+	let matched = 0
+	for (const item of list) {
+		const n = item?.name as string
+		const w = n ? weightByName.get(n) : undefined
+		if (!n || w === undefined) continue
+		matched++
+		item.cap_weight = w
+		if (Array.isArray(item.strategy_list)) {
+			for (const s of item.strategy_list as Array<Record<string, unknown>>) {
+				s.cap_weight = w
+			}
+		}
+	}
+	if (matched === 0) {
+		return { matched, localStorageUpdated: false, rStoreSlots: 0 }
+	}
+	store.set(storeKey, list)
+
+	// -- 同步 renderer localStorage（界面与启动时的全量同步源）
+	const mainWindow = windowManager.getWindow()
+	let localStorageUpdated = false
+	if (mainWindow && !mainWindow.isDestroyed()) {
+		try {
+			const storageKey =
+				libraryType === "pos" ? "fusion" : "selectStockStrategy25"
+			const js = `
+				(function() {
+					var key = ${JSON.stringify(storageKey)};
+					var weights = ${JSON.stringify(Object.fromEntries(weightByName))};
+					var list = [];
+					try {
+						var raw = localStorage.getItem(key);
+						if (raw) { list = JSON.parse(raw); if (!Array.isArray(list)) list = []; }
+					} catch (e) { list = []; }
+					var n = 0;
+					for (var i = 0; i < list.length; i++) {
+						var item = list[i];
+						if (!item || typeof item.name !== "string" || !(item.name in weights)) continue;
+						n++;
+						item.cap_weight = weights[item.name];
+						if (Array.isArray(item.strategy_list)) {
+							for (var j = 0; j < item.strategy_list.length; j++) {
+								item.strategy_list[j].cap_weight = weights[item.name];
+							}
+						}
+					}
+					if (n > 0) {
+						var mergedJson = JSON.stringify(list);
+						localStorage.setItem(key, mergedJson);
+						window.dispatchEvent(new StorageEvent('storage', { key: key, newValue: mergedJson }));
+					}
+					return n;
+				})()
+			`
+			localStorageUpdated = Boolean(
+				await mainWindow.webContents.executeJavaScript(js, true),
+			)
+		} catch (error) {
+			console.error("[MCP] 同步 localStorage 权重失败:", error)
+		}
+	}
+
+	// -- 同步 real_market_25.json（zeus 实际读取的策略注册表）
+	let rStoreSlots = 0
+	try {
+		for (const [key, entry] of Object.entries(rStore.store ?? {})) {
+			if (!key.startsWith("strategy_")) continue
+			const e = entry as Record<string, unknown> | undefined
+			if (typeof e?.name !== "string") continue
+			for (const [n, w] of weightByName) {
+				if (
+					e.name === n ||
+					e.name.endsWith(`-${n}`) ||
+					e.name.endsWith(`.${n}`) ||
+					e.name.includes(`-${n}#`)
+				) {
+					rStore.set(`${key}.strategy_weight`, w)
+					rStoreSlots++
+					break
+				}
+			}
+		}
+	} catch (error) {
+		console.error("[MCP] 同步 real_market_25 权重失败:", error)
+	}
+
+	return { matched, localStorageUpdated, rStoreSlots }
+}
+
+/**
  * POST /mcp/backtest/run - 执行策略回测
  *
  * 根据 libraryType 选择内核：选股→aqua，仓位管理→zeus。
  * 回测是长耗时操作（可能几分钟到几十分钟），请求会阻塞至回测完成。
  * 回测期间不能同时运行实盘。
+ *
+ * body.only_backtest_name=true（仅 pos/zeus 有效）：pos 模式回测范围为全部
+ * weight>0 策略组的融合组合，开启后先将其他组权重临时置 0（三层同步），
+ * 只回测当前 backtest_name 策略组，结束后无论成败自动恢复原权重。
  */
 mcpRouter.post("/backtest/run", async (c: Context) => {
 	const libraryType = store.get(LIBRARY_TYPE, "select") as string
 	const kernel = libraryType === "pos" ? "zeus" : "aqua"
 
+	const body = (await c.req.json().catch(() => ({}))) as {
+		only_backtest_name?: boolean
+	}
+
+	// 临时隔离：仅保留 backtest_name 策略组的非零权重
+	let weightSnapshot: Array<{ name: string; weight: number }> | null = null
+	let isolatedGroups = 0
+	if (body.only_backtest_name && libraryType === "pos") {
+		const backtestName = store.get(
+			`${POS_MGMT_STRATEGY_CONFIG}.backtest_name`,
+			"",
+		) as string
+		const list =
+			(store.get("pos_mgmt.strategies", []) as Array<
+				Record<string, unknown>
+			>) ?? []
+		const groupNames = new Set(
+			list.map((i) => i?.name as string).filter(Boolean),
+		)
+		if (!backtestName || !groupNames.has(backtestName)) {
+			return c.json(
+				{
+					code: 400,
+					message: `only_backtest_name 隔离失败：库内未找到 backtest_name 对应的策略组（${backtestName || "未设置"}）`,
+				},
+				400,
+			)
+		}
+		weightSnapshot = list
+			.map((i) => ({
+				name: i?.name as string,
+				weight: (i?.cap_weight as number) ?? 0,
+			}))
+			.filter((a) => a.name)
+		const zeroOthers = weightSnapshot
+			.filter((a) => a.name !== backtestName && a.weight > 0)
+			.map((a) => ({ name: a.name, weight: 0 }))
+		if (zeroOthers.length > 0) {
+			const r = await applyStrategyWeights(libraryType, zeroOthers)
+			isolatedGroups = r.matched
+		}
+	}
+
 	const startedAt = Date.now()
 	try {
-		await execBin(["select"], "MCP策略回测", kernel)
-	} catch (error) {
-		return c.json(
-			{
-				code: 500,
-				message: `回测失败: ${error instanceof Error ? error.message : String(error)}`,
-			},
-			500,
-		)
-	}
+		try {
+			await execBin(["select"], "MCP策略回测", kernel)
+		} catch (error) {
+			return c.json(
+				{
+					code: 500,
+					message: `回测失败: ${error instanceof Error ? error.message : String(error)}`,
+				},
+				500,
+			)
+		}
 
-	const artifact = await findBacktestArtifact(libraryType, startedAt)
-	if (!artifact.fresh) {
-		return c.json(
-			{
-				code: 500,
-				message: `回测未产出结果：内核可能执行失败（未见本次运行生成的 策略评价.csv），请检查 real_trading/logs/${kernel}.log 中的错误详情`,
-			},
-			500,
-		)
-	}
+		const artifact = await findBacktestArtifact(libraryType, startedAt)
+		if (!artifact.fresh) {
+			return c.json(
+				{
+					code: 500,
+					message: `回测未产出结果：内核可能执行失败（未见本次运行生成的 策略评价.csv），请检查 real_trading/logs/${kernel}.log 中的错误详情`,
+				},
+				500,
+			)
+		}
 
-	return c.json({
-		code: 0,
-		data: {
-			kernel,
-			libraryType,
-			backtestName: artifact.backtestName,
-			kernelVersion: await readKernelVersionTag(kernel),
-			durationMs: Date.now() - startedAt,
-			resultPath: artifact.csvPath,
-		},
-		message: "策略回测已完成",
-	})
+		return c.json({
+			code: 0,
+			data: {
+				kernel,
+				libraryType,
+				backtestName: artifact.backtestName,
+				kernelVersion: await readKernelVersionTag(kernel),
+				durationMs: Date.now() - startedAt,
+				resultPath: artifact.csvPath,
+				isolatedGroups: isolatedGroups > 0 ? isolatedGroups : undefined,
+			},
+			message: "策略回测已完成",
+		})
+	} finally {
+		// 恢复原权重（无论回测成败）
+		if (weightSnapshot && isolatedGroups > 0) {
+			try {
+				await applyStrategyWeights(libraryType, weightSnapshot)
+			} catch (error) {
+				console.error("[MCP] 恢复策略权重失败:", error)
+			}
+		}
+	}
 })
 
 /**
@@ -1054,7 +1221,8 @@ mcpRouter.get("/strategy/library", async (c: Context) => {
  * 三层同步：config.json（electron-store）、renderer localStorage（界面与
  * 启动全量同步源）、real_market_25.json（zeus 实际读取的策略注册表）。
  * 注意：pos 模式回测范围为全部 weight>0 策略的融合组合，回测某个
- * variant 前应将其余策略组权重设为 0。
+ * variant 前应将其余策略组权重设为 0，或在 /mcp/backtest/run 传
+ * only_backtest_name=true 临时隔离（结束自动恢复）。
  */
 mcpRouter.post("/strategy/weight", async (c: Context) => {
 	const body = await c.req.json().catch(() => ({}))
@@ -1118,20 +1286,7 @@ mcpRouter.post("/strategy/weight", async (c: Context) => {
 		}
 	}
 
-	let matched = 0
-	for (const item of list) {
-		const n = item?.name as string
-		if (!n || !targets.has(n)) continue
-		matched++
-		item.cap_weight = weight
-		if (Array.isArray(item.strategy_list)) {
-			for (const s of item.strategy_list as Array<Record<string, unknown>>) {
-				s.cap_weight = weight
-			}
-		}
-	}
-
-	if (matched === 0) {
+	if (targets.size === 0) {
 		const available = list.map((i) => i?.name).filter(Boolean)
 		return c.json(
 			{
@@ -1142,89 +1297,21 @@ mcpRouter.post("/strategy/weight", async (c: Context) => {
 		)
 	}
 
-	store.set(storeKey, list)
-
-	// -- 同步 renderer localStorage（界面与启动时的全量同步源）
-	const mainWindow = windowManager.getWindow()
-	let localStorageUpdated = false
-	if (mainWindow && !mainWindow.isDestroyed()) {
-		try {
-			const storageKey =
-				libraryType === "pos" ? "fusion" : "selectStockStrategy25"
-			const js = `
-				(function() {
-					var key = ${JSON.stringify(storageKey)};
-					var targets = ${JSON.stringify([...targets])};
-					var w = ${JSON.stringify(weight)};
-					var list = [];
-					try {
-						var raw = localStorage.getItem(key);
-						if (raw) { list = JSON.parse(raw); if (!Array.isArray(list)) list = []; }
-					} catch (e) { list = []; }
-					var n = 0;
-					for (var i = 0; i < list.length; i++) {
-						var item = list[i];
-						if (!item || targets.indexOf(item.name) < 0) continue;
-						n++;
-						item.cap_weight = w;
-						if (Array.isArray(item.strategy_list)) {
-							for (var j = 0; j < item.strategy_list.length; j++) {
-								item.strategy_list[j].cap_weight = w;
-							}
-						}
-					}
-					if (n > 0) {
-						var mergedJson = JSON.stringify(list);
-						localStorage.setItem(key, mergedJson);
-						window.dispatchEvent(new StorageEvent('storage', { key: key, newValue: mergedJson }));
-					}
-					return n;
-				})()
-			`
-			localStorageUpdated = Boolean(
-				await mainWindow.webContents.executeJavaScript(js, true),
-			)
-		} catch (error) {
-			console.error("[MCP] 同步 localStorage 权重失败:", error)
-		}
-	}
-
-	// -- 同步 real_market_25.json（zeus 实际读取的策略注册表）
-	let rStoreSlots = 0
-	try {
-		for (const [key, entry] of Object.entries(rStore.store ?? {})) {
-			if (!key.startsWith("strategy_")) continue
-			const e = entry as Record<string, unknown> | undefined
-			if (typeof e?.name !== "string") continue
-			for (const n of targets) {
-				if (
-					e.name === n ||
-					e.name.endsWith(`-${n}`) ||
-					e.name.endsWith(`.${n}`) ||
-					e.name.includes(`-${n}#`)
-				) {
-					rStore.set(`${key}.strategy_weight`, weight)
-					rStoreSlots++
-					break
-				}
-			}
-		}
-	} catch (error) {
-		console.error("[MCP] 同步 real_market_25 权重失败:", error)
-	}
+	const assignments = [...targets].map((n) => ({ name: n, weight }))
+	const syncResult = await applyStrategyWeights(libraryType, assignments)
 
 	return c.json({
 		code: 0,
 		data: {
 			weight,
 			libraryType,
-			matched,
+			matched: syncResult.matched,
 			matchedNames,
 			missingNames: missingNames.length > 0 ? missingNames : undefined,
-			localStorageUpdated,
-			rStoreSlots,
+			localStorageUpdated: syncResult.localStorageUpdated,
+			rStoreSlots: syncResult.rStoreSlots,
 		},
-		message: `已设置 ${matched} 个策略组资金占比为 ${(weight * 100).toFixed(1)}%${missingNames.length > 0 ? `（未找到: ${missingNames.join("、")}）` : ""}`,
+		message: `已设置 ${syncResult.matched} 个策略组资金占比为 ${(weight * 100).toFixed(1)}%${missingNames.length > 0 ? `（未找到: ${missingNames.join("、")}）` : ""}`,
 	})
 })
 

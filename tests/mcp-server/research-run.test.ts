@@ -496,14 +496,81 @@ strategy_list = [
 			verdict: "sota",
 			lesson: "达标",
 		})
-		const ok = closeRun("run-lc", "achieved", "全部阈值达标")
+		// 已关闭（abandoned）的 run 默认拒绝再次关闭
+		assert.throws(
+			() => closeRun("run-lc", "achieved", "全部阈值达标"),
+			/已关闭/,
+		)
+		const ok = closeRun("run-lc", "achieved", "全部阈值达标", true)
 		assert.strictEqual(ok.status, "achieved")
+		assert.strictEqual(ok.previousStatus, "abandoned")
+		assert.strictEqual(ok.previousCloseReason, "基线差距过大，转向其他配方")
 		assert.ok(ok.closedAt)
 		assert.strictEqual(getRunStatuses()["run-lc"].status, "achieved")
-		closeRun("run-lc", "paused", "阶段性暂停")
+		closeRun("run-lc", "paused", "阶段性暂停", true)
 		assert.strictEqual(getRunStatuses()["run-lc"].status, "paused")
 		assert.strictEqual(getRunStatuses()["run-lc"].closeReason, "阶段性暂停")
 		assert.throws(() => closeRun("run-nope", "paused", "x"), /不存在/)
+	})
+
+	it("close_run: active run closes normally; closed run needs force=true", () => {
+		createResearchRun("run-guard", { goal: "幂等保护", thresholds: {} })
+		// active run 正常关闭（防回归）
+		const first = closeRun("run-guard", "paused", "先暂停观察")
+		assert.strictEqual(first.status, "paused")
+		assert.ok(first.closedAt)
+		// 已关闭后再次关闭报错并回显现状
+		assert.throws(
+			() => closeRun("run-guard", "abandoned", "静默改判"),
+			/已关闭（status=paused.*force=true/,
+		)
+		// force=true 允许改判且回显被覆盖的旧值
+		const again = closeRun("run-guard", "abandoned", "确认放弃", true)
+		assert.strictEqual(again.status, "abandoned")
+		assert.strictEqual(again.previousStatus, "paused")
+		assert.strictEqual(again.previousCloseReason, "先暂停观察")
+		assert.strictEqual(getRunStatuses()["run-guard"].status, "abandoned")
+	})
+
+	it("rejects dev entry when evolving_n budget exhausted; validation exempt", () => {
+		createResearchRun("run-cap", {
+			goal: "预算硬闸门",
+			thresholds: {},
+			evolving_n: 2,
+		})
+		recordExperiment("run-cap", { variantId: "v1", hypothesis: "h1" })
+		const r2 = recordExperiment("run-cap", {
+			variantId: "v2",
+			hypothesis: "h2",
+		})
+		assert.deepStrictEqual(r2.budget, { evolvingN: 2, used: 2, remaining: 0 })
+		// 第 3 条 dev 在写入前被拦截
+		assert.throws(
+			() => recordExperiment("run-cap", { variantId: "v3", hypothesis: "h3" }),
+			/迭代预算已用完（evolving_n=2）/,
+		)
+		assert.strictEqual(getExperimentTrace("run-cap").total, 2)
+		// validation 条目不受预算限制
+		const rv = recordExperiment("run-cap", {
+			variantId: "v2",
+			hypothesis: "validation 窗口样本外验证",
+			type: "validation",
+			metrics: { annual_return_pct: 9 },
+		})
+		assert.strictEqual(rv.entry.type, "validation")
+		assert.deepStrictEqual(rv.budget, { evolvingN: 2, used: 2, remaining: 0 })
+	})
+
+	it("does not gate dev entries when brief has no evolving_n", () => {
+		createResearchRun("run-nocap", { goal: "无预算", thresholds: {} })
+		for (const v of ["v1", "v2", "v3"]) {
+			const r = recordExperiment("run-nocap", {
+				variantId: v,
+				hypothesis: `h-${v}`,
+			})
+			assert.strictEqual(r.budget, null)
+		}
+		assert.strictEqual(getExperimentTrace("run-nocap").total, 3)
 	})
 
 	it("close_run rejects runs without brief.json and does not poison the run", () => {

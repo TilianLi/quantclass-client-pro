@@ -101,7 +101,10 @@ export function generateCandidateReport(params: CandidateReport): string {
 	}
 
 	lines.push("", "## 策略说明", "", params.summary, "")
-	lines.push("---", "请确认是否将该策略导入 QuantClass 并启用实盘交易。")
+	lines.push(
+		"---",
+		"该策略已导入 QuantClass 策略库（回测验证环境）。请确认是否为其分配实盘资金占比（set_strategy_weight）并开启自动交易。",
+	)
 
 	return lines.join("\n")
 }

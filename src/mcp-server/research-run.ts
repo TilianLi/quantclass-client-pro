@@ -55,9 +55,18 @@ const backtestWindowSchema = z.object({
 	initial_cash: z.number().optional(),
 	start_date: z.string().optional(),
 	end_date: z.string().nullable().optional(),
-	filter_kcb: z.string().optional(),
-	filter_cyb: z.string().optional(),
-	filter_bj: z.string().optional(),
+	filter_kcb: z
+		.string()
+		.optional()
+		.describe('线缆口径 "0"/"1"，客户端存储为 boolean'),
+	filter_cyb: z
+		.string()
+		.optional()
+		.describe('线缆口径 "0"/"1"，客户端存储为 boolean'),
+	filter_bj: z
+		.string()
+		.optional()
+		.describe('线缆口径 "0"/"1"，客户端存储为 boolean'),
 })
 
 /**
@@ -478,6 +487,17 @@ export function recordExperiment(
 		ts: parsed.ts ?? localTimestamp(),
 	}
 
+	// 迭代预算硬闸门：dev 条目达 evolving_n 上限后写入前拦截（validation 不受限），
+	// 避免预算耗尽后仍静默接受实验（旧实现只报告 remaining，可出现 remaining:-1）
+	if (brief?.evolving_n !== undefined && full.type === "dev") {
+		const devCount = priorEntries.filter((e) => e.type === "dev").length
+		if (devCount >= brief.evolving_n) {
+			throw new Error(
+				`迭代预算已用完（evolving_n=${brief.evolving_n}）：dev 实验已达上限，请 close_run 或提高预算后再试`,
+			)
+		}
+	}
+
 	// walkforward 强制拦截：brief 配置 walkforward 后，带绩效的 dev 条目必须
 	// 经 run_dev_walkforward 写入（含分窗口明细），防止绕过最劣窗口口径。
 	// 例外：无 metrics 且无 evaluation 的失败记录（回测未跑起来）可直接写入。
@@ -697,13 +717,22 @@ export type RunStatus = "active" | "achieved" | "abandoned" | "paused"
 /**
  * 关闭 run：把 status/closedAt/closeReason 写入 brief.json。
  * 读 brief 原文 JSON 合并写回（不经 schema strip，保留全部既有字段）。
- * achieved 要求存在 SOTA 记录；重复 close 允许（更新状态与原因）。
+ * achieved 要求存在 SOTA 记录。
+ * 幂等保护：已关闭（status ≠ active）的 run 默认拒绝再次关闭，
+ * 显式传 force=true 才允许改判（响应回显被覆盖的旧值）。
  */
 export function closeRun(
 	runId: string,
 	status: Exclude<RunStatus, "active">,
 	reason: string,
-): { runId: string; status: RunStatus; closedAt: string } {
+	force = false,
+): {
+	runId: string
+	status: RunStatus
+	closedAt: string
+	previousStatus?: string
+	previousCloseReason?: string
+} {
 	const dir = runDir(runId)
 	if (!existsSync(dir)) throw new Error(`run 不存在: ${runId}`)
 	if (!reason || !reason.trim()) throw new Error("closeReason 必填")
@@ -722,13 +751,21 @@ export function closeRun(
 	} catch {
 		throw new Error(`brief.json 不是合法 JSON: ${path}`)
 	}
+	const previousStatus = typeof raw.status === "string" ? raw.status : undefined
+	const previousCloseReason =
+		typeof raw.closeReason === "string" ? raw.closeReason : undefined
+	if (previousStatus && previousStatus !== "active" && !force) {
+		throw new Error(
+			`run 已关闭（status=${previousStatus}, closedAt=${raw.closedAt}），如需改判请显式传 force=true`,
+		)
+	}
 	const closedAt = localTimestamp()
 	writeFileSync(
 		path,
 		`${JSON.stringify({ ...raw, status, closedAt, closeReason: reason.trim() }, null, 2)}\n`,
 		"utf-8",
 	)
-	return { runId, status, closedAt }
+	return { runId, status, closedAt, previousStatus, previousCloseReason }
 }
 
 /** 各 run 的状态映射（无 brief 或无 status 字段的 run 不出现）。供 list_strategies 组装。 */
