@@ -6,9 +6,9 @@
 
 ## 0. 前置条件
 
-- QuantClass 客户端已启动，MCP 已连接（46 个工具可用）。
+- QuantClass 客户端已启动，MCP 已连接（47 个工具可用）。
 - 股票数据已下载、非交易时段（回测期间不能跑实盘）。
-- `run_backtest` 是长耗时阻塞调用（几分钟到几十分钟），确保 MCP 客户端超时设置足够。
+- `run_backtest` 是长耗时阻塞调用（几分钟到几十分钟），确保 MCP 客户端超时设置足够；`run_dev_walkforward` 为异步 job（立即返回 jobId，用 `get_dev_walkforward_job` 轮询），不受 MCP 超时影响。
 - 建议先 `get_system_status` 做一次预检。
 
 ## 1. 响应与错误约定
@@ -37,7 +37,7 @@
      - **`validation`（样本外窗口，结构同 backtest，强烈建议提供）**：防过拟合的核心纪律——**进化循环只能使用 `backtest` 窗口，`validation` 窗口在循环期间禁止用于任何回测**，仅在第 5 节收尾时用于一次 SOTA 复核。例如 backtest=2023-01-01→2024-12-31、validation=2025-01-01→今
      - `evolving_n`：最大进化轮数，缺省按 5 执行
 2. 若返回「run 已存在」错误：**这是恢复信号，不是失败**。改调 `get_experiment_trace(runId)` + `get_run_summary(runId)`，从 trace 中最大 variantId 序号 +1 继续（trace 为空则从 v1 开始）。不要试图删除或重建 run。
-3. 初始化或恢复后，按 `brief.backtest` 调一次 `set_backtest_config`（只传 brief 里有的字段）。
+3. 初始化后回测配置已由 `create_research_run` 按 `brief.backtest` 自动同步（响应含 `configSync`）。若响应中 `configSync.applied=false`（客户端不可达）或需临时校正，再手动按 `brief.backtest` 调一次 `set_backtest_config`（只传 brief 里有的字段）作为可选校正。
 
 ## 4. 主循环（每轮一个 variant）
 
@@ -125,18 +125,26 @@
 - `nextHypothesis`：预埋给下一轮的假设种子（对应 RD-Agent 反馈阶段的 new_hypothesis），写清建议验证什么、为什么。
 - lesson 占位文本（「待回填」「TBD」等）会被工具拒绝；假设与历史高度相似时工具返回 warnings，需在 lesson 中说明与相似实验的差异。
 
+**brief 配置 walkforward 时（多窗口 dev 闭环）**：带绩效的 dev 实验不能直接用 `record_experiment` 写入（会被拦截），改走 `run_dev_walkforward` 异步 job：
+
+1. 调 `run_dev_walkforward(runId, variantId, hypothesis, changes?, lesson?)`：前置校验（walkforward 配置、迭代预算预检、无进行中 job）后立即返回 `{ jobId, status:"running", totalWindows }`，**不再阻塞等待**。
+2. 用 `get_dev_walkforward_job(runId)` 轮询：job 文件实时记录当前窗口序号与各窗口 status/metrics/evaluation；`status="success"` 表示全部窗口完成且 trace 已写入，`status="error"` 见 job 的 `error` 字段（全部窗口失败时不写 trace）。
+3. **确认 trace**：`status="success"` 后调 `get_experiment_trace(runId, tail=1)` 确认 type=dev 条目已落盘（含分窗口明细 windows 与最劣窗口 worstWindow），job 的 `traceEntry`/`budget` 字段可直接核对。
+4. 预算耗尽的报错（「迭代预算已用完」）在启动前预检即抛出，不会白跑回测。
+
 ### 4.6 循环退出
 
 - `evaluation.passed === true`（全部阈值达标）→ 提前退出循环。
-- 达到 `evolving_n` 轮 → 退出循环。
+- 达到 `evolving_n` 轮 → 退出循环（预算为硬闸门：耗尽后 `record_experiment` / `run_dev_walkforward` 直接报错）。
 - 连续 2 次回测失败 → 终止（见 4.3）。
-- **循环退出后必须 `close_run`**：达标→`achieved`（要求存在 SOTA）；放弃→`abandoned`；暂停→`paused`，均附一句话原因。放弃或暂停时，把本轮最重要的负面发现（哪个旋钮无效/恶化）写入 `record_knowledge`——负面知识与正面知识同等宝贵，防止后续 run 重复踩坑。
+- **循环退出后必须 `close_run`**：达标→`achieved`（要求存在 SOTA）；放弃→`abandoned`；暂停→`paused`，均附一句话原因。对已关闭的 run 再次关闭会被拒绝（幂等保护），确需改判时显式传 `force=true`，响应回显被覆盖的 `previousStatus`/`previousCloseReason`。放弃或暂停时，把本轮最重要的负面发现（哪个旋钮无效/恶化）写入 `record_knowledge`——负面知识与正面知识同等宝贵，防止后续 run 重复踩坑。
 
 ## 5. 收尾：样本外复核、恢复 SOTA 与提交人工审阅
 
 1. 调 `get_run_summary(runId)` 取最终 SOTA。若全程没有任何 completed/sota 记录（全部 failed）：**不提交审阅**，输出失败总结（各轮失败原因 + `get_system_status` 诊断）后结束。
 2. **样本外复核（brief 含 validation 时必做）**：
-   - 调 `set_backtest_config` 切到 `brief.validation` 窗口（只传 brief 里有的字段），**恢复库内状态到 SOTA**（`import_strategy(<SOTA config.py 绝对路径>)` → `set_strategy_weight(name=SOTA名, weight=1)` + `others_except=[SOTA名], weight=0`），然后 `run_backtest` 一次，取 `data.parsed`
+   - 推荐走闸门工具：`run_validation(runId, variantId?)` —— `variantId` 缺省取当前 SOTA；工具会先校验当前回测策略（backtestName）与期望 variant 一致，不一致直接报错（需先 `import_strategy(<SOTA config.py 绝对路径>)` 并设置权重），防止样本外验证静默跑在旧策略上。成功返回 taskId 后由它自动切窗/快照，回测完成后调 `complete_validation(runId, variantId)` 恢复原配置并记录 type=validation 条目
+   - 手动方式（等价）：调 `set_backtest_config` 切到 `brief.validation` 窗口（只传 brief 里有的字段），**恢复库内状态到 SOTA**（`import_strategy` → `set_strategy_weight(name=SOTA名, weight=1)` + `others_except=[SOTA名], weight=0`），然后 `run_backtest` 一次，取 `data.parsed`
    - 用同一 `brief.thresholds` 调 `evaluate_backtest` 得到 OOS 的 `passed/score/details`
    - 按余量规则写 `oosNote`（文字判断）：
      ① OOS 各阈值项是否仍达标；② OOS 年化 ≥ 样本内年化的 50% 为可接受，低于为退化；
@@ -170,6 +178,10 @@
 | `get_backtest_performance` 文件不存在 | 返回错误（「策略评价文件不存在，请先执行回测」）——按回测失败处理 |
 | 指标键缺失（如无 `胜率（含0/去0）`） | 该指标不传，不编造 |
 | `record_experiment` 校验失败 | 检查 entry 字段（verdict 枚举、score 0-1、variantId/hypothesis 非空）后重写 |
+| 「迭代预算已用完」报错 | `close_run` 收尾，或修改 brief.json 提高 `evolving_n` 后继续 |
+| `run_dev_walkforward` 返回 jobId 后久未完成 | `get_dev_walkforward_job(runId)` 查进度；`status=error` 时按 `error` 字段处理（全部窗口失败不写 trace） |
+| `close_run` 报「已关闭」 | 属幂等保护；确需改判传 `force=true` |
+| `run_validation` 报策略不一致 | 先 `import_strategy(<SOTA config.py 绝对路径>)` 并 `set_strategy_weight` 设权重，再重试 |
 | 阈值全未达标且轮次耗尽 | 正常收尾：提交「当前最优」审阅（报告自带未达标标注），由人决定 |
 
 ## 8. 单轮调用序列示例（v2，假设 v1 已完成）
