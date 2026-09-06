@@ -31,7 +31,7 @@ import {
 } from "@/main/lib/scheduler.js"
 import { parsePythonConfig } from "@/main/pythonRunner.js"
 import storeApi, { rStore, store } from "@/main/store/index.js"
-import { getMcpToken } from "@/main/utils/tools.js"
+import { getMcpToken, isKernalBusy } from "@/main/utils/tools.js"
 import {
 	LIBRARY_TYPE,
 	POS_MGMT_STRATEGY_CONFIG,
@@ -528,6 +528,38 @@ mcpRouter.post("/backtest/run", async (c: Context) => {
 		if (zeroOthers.length > 0) {
 			const r = await applyStrategyWeights(libraryType, zeroOthers)
 			isolatedGroups = r.matched
+			// -- T-20260905-07：置零后回读校验（渲染端旧状态可能回写覆盖，三层同步存在竞态窗口）
+			let isolateVerified = false
+			for (let attempt = 0; attempt < 3 && !isolateVerified; attempt++) {
+				await new Promise((res) => setTimeout(res, 300))
+				const listNow =
+					(store.get("pos_mgmt.strategies", []) as Array<
+						Record<string, unknown>
+					>) ?? []
+				const offenders = listNow.filter(
+					(i) =>
+						typeof i?.name === "string" &&
+						i.name !== backtestName &&
+						typeof i?.cap_weight === "number" &&
+						i.cap_weight > 0 &&
+						zeroOthers.some((z) => z.name === i.name),
+				)
+				isolateVerified = offenders.length === 0
+				if (!isolateVerified && attempt < 2) {
+					await applyStrategyWeights(libraryType, zeroOthers)
+				}
+			}
+			if (!isolateVerified) {
+				await applyStrategyWeights(libraryType, weightSnapshot)
+				return c.json(
+					{
+						code: 409,
+						message:
+							"only_backtest_name 隔离失败：他组权重置零未生效（疑似渲染端回写竞态），已恢复原权重，请重试",
+					},
+					409,
+				)
+			}
 		}
 	}
 
@@ -590,6 +622,18 @@ mcpRouter.post("/backtest/run", async (c: Context) => {
 mcpRouter.post("/backtest/run-async", async (c: Context) => {
 	const libraryType = store.get(LIBRARY_TYPE, "select") as string
 	const kernel = libraryType === "pos" ? "zeus" : "aqua"
+
+	// -- T-20260906-10：数据更新进行中拒绝启动回测（fuel 写 CSV 与内核读 CSV 竞态致静默死亡）
+	if (await isKernalBusy("fuel")) {
+		return c.json(
+			{
+				code: 409,
+				message:
+					'数据自动更新进行中，已拒绝启动回测（防竞态，T-20260906-10）。等待更新完成或先 POST /mcp/history-data/toggle {"isOn": false} 后重试',
+			},
+			409,
+		)
+	}
 
 	try {
 		const task = await execBinDetached(
@@ -1333,6 +1377,8 @@ mcpRouter.put("/backtest/config", async (c: Context) => {
 		initial_cash: `${configKey}.initial_cash`,
 		start_date: `${configKey}.start_date`,
 		end_date: `${configKey}.end_date`,
+		// T-20260906-08：允许改名融合根产物目录（多批次融合根互相覆盖问题）
+		backtest_name: `${configKey}.backtest_name`,
 		filter_kcb: "real_market_config.filter_kcb",
 		filter_cyb: "real_market_config.filter_cyb",
 		filter_bj: "real_market_config.filter_bj",
@@ -1345,8 +1391,10 @@ mcpRouter.put("/backtest/config", async (c: Context) => {
 		if (key in allowedKeys) {
 			// 板块过滤字段与 UI 写入口径保持一致：落盘为布尔值。
 			// zeus（Python）按真值判断，非空字符串 "0" 为真，会被误当作「过滤」。
+			// T-20260905-06：数字 1 同样按真值接受（JSON 数字被静默存 false 的坑）；
+			// 数字 0 / "0" / false 仍落盘 false。
 			const stored = key.startsWith("filter_")
-				? value === "1" || value === true
+				? value === "1" || value === 1 || value === true
 				: value
 			store.set(allowedKeys[key], stored)
 			updated[key] = stored
