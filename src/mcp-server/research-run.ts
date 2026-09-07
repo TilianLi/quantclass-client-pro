@@ -132,6 +132,25 @@ export const experimentEntrySchema = z.object({
 	ts: z.string().optional(),
 	variantId: z.string().min(1),
 	hypothesis: z.string().min(1),
+	/**
+	 * 假设动作类型（借鉴 RD-Agent 的 action 路由字段，见
+	 * docs/superpowers/plans/2026-08-26-hypothesis-direction-mechanism.md）：
+	 * - tune_param：调已有组件的参数/阈值
+	 * - combine：已有因子/过滤组件的新组合
+	 * - new_factor：产生新因子（必须附 factorSpec）
+	 * - new_direction：换因子家族/股票池/框架的新研究方向
+	 */
+	action: z
+		.enum(["tune_param", "combine", "new_factor", "new_direction"])
+		.optional(),
+	/** action=new_factor 时必填：新因子规格（对齐 RD-Agent FactorTask：名称/公式/变量） */
+	factorSpec: z
+		.object({
+			factorName: z.string().min(1).describe("因子名（不含 .py 后缀）"),
+			formulation: z.string().min(1).describe("计算定义/公式"),
+			variables: z.string().optional().describe("依赖变量说明"),
+		})
+		.optional(),
 	/** 分叉父 variantId（缺省视为上一 variant，保持线性语义） */
 	basedOn: z.string().optional(),
 	/** 假设来源引用，推荐 knowledge:<id> / trace:<runId>/<variantId> / none */
@@ -184,6 +203,10 @@ export const experimentEntrySchema = z.object({
 	 */
 	verdict: z.enum(["completed", "sota", "failed"]).optional(),
 	lesson: z.string().optional(),
+	/** 数据事实：指标数值、诊断发现、与 SOTA/上轮的对比（后验条目建议必填，缺省仅 warning） */
+	observations: z.string().optional(),
+	/** 假设判定：被支持/证伪、原因分析（后验条目建议必填，缺省仅 warning） */
+	hypothesisEvaluation: z.string().optional(),
 	kernelVersion: z.string().optional(),
 	complexity: z
 		.number()
@@ -333,6 +356,18 @@ function assertLessonNotPlaceholder(lesson: string | undefined): void {
 	}
 }
 
+/**
+ * action=new_factor 的条目必须携带 factorSpec（schema 已保证 factorName/formulation
+ * 非空，此处只查存在性）。只拦写入，不影响历史条目读取。
+ */
+function assertFactorSpecIfNewFactor(entry: ExperimentEntry): void {
+	if (entry.action === "new_factor" && !entry.factorSpec) {
+		throw new Error(
+			'action="new_factor" 的实验必须附 factorSpec（factorName + formulation）：新因子假设需给出可计算的公式定义',
+		)
+	}
+}
+
 /** 字符 bigram Jaccard 相似度（归一化后），用于假设查重警告 */
 export function hypothesisSimilarity(a: string, b: string): number {
 	const norm = (s: string) => s.toLowerCase().replace(/[\s\p{P}\p{S}]/gu, "")
@@ -447,6 +482,7 @@ export function recordExperiment(
 	const parsed = parseWith(experimentEntrySchema, entry, "entry")
 
 	assertLessonNotPlaceholder(parsed.lesson)
+	assertFactorSpecIfNewFactor(parsed)
 
 	const warnings: string[] = []
 	const priorEntries = readTraceEntries(runId)
@@ -485,6 +521,20 @@ export function recordExperiment(
 		metrics,
 		complexity,
 		ts: parsed.ts ?? localTimestamp(),
+	}
+
+	// lesson 结构化软约束：后验条目（带 evaluation 且非 walkforward 写入）建议填
+	// observations / hypothesisEvaluation，缺失仅告警不阻断。run_dev_walkforward
+	// 写入的条目带 windows，其 lesson 是 job 启动前的预测文本，不适用后验结构。
+	if (
+		full.evaluation !== undefined &&
+		full.windows === undefined &&
+		(parsed.observations === undefined ||
+			parsed.hypothesisEvaluation === undefined)
+	) {
+		warnings.push(
+			"建议补充结构化结论字段：observations（数据事实/与 SOTA 对比）、hypothesisEvaluation（假设是否被支持及原因）——字段语义见 get_strategy_template 的 hypothesisSpecification",
+		)
 	}
 
 	// 迭代预算硬闸门：dev 条目达 evolving_n 上限后写入前拦截（validation 不受限），
@@ -567,6 +617,83 @@ function autoVerdict(
 		if (!best || isBetterVariant(cur, best)) best = cur
 	}
 	return !best || isBetterVariant(cand, best) ? "sota" : "completed"
+}
+
+// ============================================================
+// 后验修订（amend）
+// ============================================================
+
+const amendPatchSchema = z
+	.object({
+		observations: z.string().min(1).optional(),
+		hypothesisEvaluation: z.string().min(1).optional(),
+		lesson: z.string().min(1).optional(),
+		nextHypothesis: z.string().min(1).optional(),
+	})
+	.refine((p) => Object.values(p).some((v) => v !== undefined), {
+		message:
+			"patch 至少包含一个字段（observations/hypothesisEvaluation/lesson/nextHypothesis）",
+	})
+
+export interface AmendExperimentResult {
+	runId: string
+	tracePath: string
+	entry: ExperimentEntry
+}
+
+/**
+ * 修订最近一次实验记录（仅限最新条目）：run_dev_walkforward 落盘时 lesson 是
+ * 启动前的预测文本，回测完成后由 Summarizer 角色用本函数回填结构化结论
+ * （observations/hypothesisEvaluation）或以实际结论替换 lesson。
+ * trace 对新条目保持 append-only，本函数是唯一例外——原地修订最新一条。
+ */
+export function amendExperiment(
+	runId: string,
+	variantId: string,
+	patch: unknown,
+): AmendExperimentResult {
+	const dir = runDir(runId)
+	if (!existsSync(dir)) throw new Error(`run 不存在: ${runId}`)
+	const path = tracePath(runId)
+	if (!existsSync(path)) {
+		throw new Error(`trace.jsonl 不存在: ${runId}（尚无实验记录）`)
+	}
+	const parsed = parseWith(amendPatchSchema, patch, "patch")
+	if (parsed.lesson !== undefined) assertLessonNotPlaceholder(parsed.lesson)
+
+	const lines = readFileSync(path, "utf-8").split(/\r?\n/)
+	let lastIdx = -1
+	for (let i = lines.length - 1; i >= 0; i--) {
+		if (lines[i].trim()) {
+			lastIdx = i
+			break
+		}
+	}
+	if (lastIdx === -1) throw new Error(`trace.jsonl 为空: ${runId}`)
+
+	let lastRaw: unknown
+	try {
+		lastRaw = JSON.parse(lines[lastIdx])
+	} catch {
+		throw new Error(`trace.jsonl 第 ${lastIdx + 1} 行不是合法 JSON`)
+	}
+	const last = parseWith(
+		experimentEntrySchema,
+		lastRaw,
+		`trace.jsonl 第 ${lastIdx + 1} 行`,
+	)
+	if (last.variantId !== variantId) {
+		throw new Error(
+			`只能修订最近一次实验记录（最新条目为 ${last.variantId}，传入 ${variantId}）`,
+		)
+	}
+
+	// zod 输出省略缺省可选键，spread 不会用 undefined 覆盖既有字段
+	const merged: ExperimentEntry = { ...last, ...parsed }
+	const kept = lines.slice(0, lastIdx + 1)
+	kept[lastIdx] = JSON.stringify(merged)
+	writeFileSync(path, `${kept.join("\n")}\n`, "utf-8")
+	return { runId, tracePath: path, entry: merged }
 }
 
 export function getExperimentTrace(

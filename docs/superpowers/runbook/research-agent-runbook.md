@@ -6,7 +6,7 @@
 
 ## 0. 前置条件
 
-- QuantClass 客户端已启动，MCP 已连接（47 个工具可用）。
+- QuantClass 客户端已启动，MCP 已连接（49 个工具可用）。
 - 股票数据已下载、非交易时段（回测期间不能跑实盘）。
 - `run_backtest` 是长耗时阻塞调用（几分钟到几十分钟），确保 MCP 客户端超时设置足够；`run_dev_walkforward` 为异步 job（立即返回 jobId，用 `get_dev_walkforward_job` 轮询），不受 MCP 超时影响。
 - 建议先 `get_system_status` 做一次预检。
@@ -43,6 +43,21 @@
 
 每轮严格按 6 步执行，**一轮只验证一个假设**（保证 trace 可归因）。回测串行，不并发。
 
+### 4.0 Loop 编排（多 Agent 驱动模式）
+
+每轮迭代以 `get_loop_state(runId)` 为入口——它是纯状态机：从可观察产物（brief/trace/dev-walkforward-job/validation-state/variant 目录/评审报告）推导当前 phase，返回预算、`plateau`（连续 2 轮非 SOTA，触发假设规则书转向条款）、`nextVariantId`、下一步动作清单、当前阶段角色 playbook，以及 **`dispatch`：注入运行时上下文后可直接转发的子代理分派指令**（`role`/`prompt`/`expects`/`onReturn`——编排器把 `prompt` 原样发给子代理，按 `expects` 验收输出，按 `onReturn` 接续）。phase 语义：
+
+| phase | 含义 | 该做什么 |
+|-------|------|----------|
+| `await_hypothesis` | 待提假设 | dispatch **Researcher** 子代理（只读工具），产出假设 JSON |
+| `await_backtest` | 有 variant 目录但无 trace 记录 | dispatch **Developer** 子代理（写文件→validate，不碰导入/回测）；其返回后由编排器按 nextActions 执行 **Runner** 确定性步骤（导入→权重隔离→触发回测） |
+| `walkforward_running` | walkforward job 进行中 | `get_dev_walkforward_job` 轮询 |
+| `await_summary` | 回测完成待回填结论 | dispatch **Evaluator** 子代理（只读，看指标+诊断出结构化结论）→ 把输出转 **Summarizer** 子代理（`amend_experiment` 落盘 + `record_knowledge` 结晶） |
+| `await_validation` / `await_review` / `await_close` | 收尾各闸门 | 按 nextActions 直接调工具（无 LLM 角色） |
+| `validation_running` / `closed` | 闸门锁/已关闭 | 轮询或停手 |
+
+状态机不存任何额外状态，会话中断后重调 `get_loop_state` 即可恢复现场。每轮只验证一个假设、回测串行的纪律不变。五份角色资产（含无 LLM 的 Runner checklist）固定在 `src/mcp-server/loop-playbook.ts`。
+
 ### 4.1 Researcher：提出假设
 
 1. 按固定顺序收集上下文（不得跳步）：
@@ -60,6 +75,7 @@
    - `directoryStructure`：策略库/因子库/信号库/外部数据/截面因子库 目录约定
 4. 输出本轮提案（内部记录，不写文件）：
    - `variantId`：`v{n}`（顺序递增，failed 的也占号）
+   - `action`：假设动作类型四选一——`tune_param`（调参/阈值）、`combine`（已有组件新组合）、`new_factor`（产生新因子，须备 factorSpec）、`new_direction`（换因子家族/股票池/框架）。**取值规则见 `get_strategy_template` 响应里的 `hypothesisSpecification`（假设规则书）**：先简后繁；连续 2 轮 SOTA 无改进则下一轮不得再用 tune_param；new_factor 必须给出可计算 formulation 并陈述与现有因子的预期低相关理由
    - `hypothesis`：一句话可证伪假设（机制 + 预期改善的指标方向）
    - `changes`：相对上一 variant 的具体改动（因子/参数/过滤条件）
    - 约束：**不得与 trace 中已试过的假设重复**；优先回应上一轮 `lesson`；只使用 template 中确认存在的因子与信号（因子存在性由 `validate_strategy` 强制检查）
@@ -108,14 +124,19 @@
 {
   "variantId": "v1",
   "hypothesis": "20日动量叠加换手率过滤可提升年化并降低回撤",
+  "action": "combine",
   "changes": "factor_list 改为 mom_20；filter_list 加 turnover_rank < 0.3",
   "files": ["config.py"],
   "evaluation": { "passed": false, "score": 0.33 },
   "verdict": "completed",
-  "lesson": "动量窗口过短导致换手过高、回撤超标；下一轮拉长窗口并加波动率过滤"
+  "lesson": "动量窗口过短导致换手过高、回撤超标；下一轮拉长窗口并加波动率过滤",
+  "observations": "年化 12.1%（阈值 15%）、回撤 -28.4%（阈值 25%）；较 SOTA v0 年化 +1.3pp 但回撤恶化 4pp",
+  "hypothesisEvaluation": "部分支持：换手率过滤有效降低了回撤但未达标，动量窗口过短是主要拖累"
 }
 ```
 
+- `action`：假设动作类型（`tune_param`/`combine`/`new_factor`/`new_direction`），规则见假设规则书；`new_factor` 必须同时传 `factorSpec: { factorName, formulation, variables? }`，缺失会被工具直接拒绝。
+- `observations` / `hypothesisEvaluation`：结构化结论（数据事实、假设判定）。带 `evaluation` 的后验条目（含 complete_validation 写入的 validation 条目）缺省会收到 warning（不阻断）；`run_dev_walkforward` 写入的条目不适用（其 lesson 为启动前预测文本）。
 - `verdict`：`completed`（正常完成未刷新 SOTA）/ `sota`（刷新历史最优）/ `failed`（校验或回测失败）。
 - `failed` 时 `metrics`/`evaluation` 可缺省（fromLatestBacktest 可不传），但 `lesson` 必须写明失败原因摘要。
 - `complexity`（旋钮计数）：填 `factor_list` + `filter_list` + `filter_list_post` + `cross_sections` 的条目总数。SOTA 同分时**复杂度低者优先**（防过拟合的正则项），都不填才退回比年化。
@@ -127,10 +148,11 @@
 
 **brief 配置 walkforward 时（多窗口 dev 闭环）**：带绩效的 dev 实验不能直接用 `record_experiment` 写入（会被拦截），改走 `run_dev_walkforward` 异步 job：
 
-1. 调 `run_dev_walkforward(runId, variantId, hypothesis, changes?, lesson?)`：前置校验（walkforward 配置、迭代预算预检、无进行中 job）后立即返回 `{ jobId, status:"running", totalWindows }`，**不再阻塞等待**。
+1. 调 `run_dev_walkforward(runId, variantId, hypothesis, action?, factorSpec?, changes?, lesson?)`：前置校验（walkforward 配置、迭代预算预检、无进行中 job）后立即返回 `{ jobId, status:"running", totalWindows }`，**不再阻塞等待**。action/factorSpec 语义与 record_experiment 一致，落盘时透传进 trace 条目。
 2. 用 `get_dev_walkforward_job(runId)` 轮询：job 文件实时记录当前窗口序号与各窗口 status/metrics/evaluation；`status="success"` 表示全部窗口完成且 trace 已写入，`status="error"` 见 job 的 `error` 字段（全部窗口失败时不写 trace）。
 3. **确认 trace**：`status="success"` 后调 `get_experiment_trace(runId, tail=1)` 确认 type=dev 条目已落盘（含分窗口明细 windows 与最劣窗口 worstWindow），job 的 `traceEntry`/`budget` 字段可直接核对。
 4. 预算耗尽的报错（「迭代预算已用完」）在启动前预检即抛出，不会白跑回测。
+5. **回填结构化结论**：job 落盘的 trace 条目里 lesson 是启动前的预测文本；回测完成后按 `get_loop_state` 的 `await_summary` 提示，用 `amend_experiment(runId, variantId, { observations, hypothesisEvaluation, lesson?, nextHypothesis? })` 回填后验结论（只能修订最新条目）。
 
 ### 4.6 循环退出
 
@@ -178,9 +200,11 @@
 | `get_backtest_performance` 文件不存在 | 返回错误（「策略评价文件不存在，请先执行回测」）——按回测失败处理 |
 | 指标键缺失（如无 `胜率（含0/去0）`） | 该指标不传，不编造 |
 | `record_experiment` 校验失败 | 检查 entry 字段（verdict 枚举、score 0-1、variantId/hypothesis 非空）后重写 |
+| `action="new_factor"` 被拒绝 | 缺 `factorSpec`：补 `factorName` + `formulation`（可计算的公式定义）后重写 |
 | 「迭代预算已用完」报错 | `close_run` 收尾，或修改 brief.json 提高 `evolving_n` 后继续 |
 | `run_dev_walkforward` 返回 jobId 后久未完成 | `get_dev_walkforward_job(runId)` 查进度；`status=error` 时按 `error` 字段处理（全部窗口失败不写 trace） |
 | `close_run` 报「已关闭」 | 属幂等保护；确需改判传 `force=true` |
+| `amend_experiment` 报「只能修订最近一次」 | 只能改 trace 最新条目；历史条目不修，改进写入下一轮 nextHypothesis |
 | `run_validation` 报策略不一致 | 先 `import_strategy(<SOTA config.py 绝对路径>)` 并 `set_strategy_weight` 设权重，再重试 |
 | 阈值全未达标且轮次耗尽 | 正常收尾：提交「当前最优」审阅（报告自带未达标标注），由人决定 |
 

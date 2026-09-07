@@ -4,7 +4,7 @@
 
 ## 1. 项目概览
 
-`QuantclassClient`（量化小讲堂客户端）是一款面向量化交易的桌面端 Electron 应用，当前版本 `4.1.0`。它封装了股票数据下载、策略管理、回测、实时数据、实盘交易等能力，并通过 MCP（Model Context Protocol）向外部 AI 客户端暴露本地 API。
+`QuantclassClient`（量化小讲堂客户端）是一款面向量化交易的桌面端 Electron 应用，当前版本 `4.1.1`。它封装了股票数据下载、策略管理、回测、实时数据、实盘交易等能力，并通过 MCP（Model Context Protocol）向外部 AI 客户端暴露本地 API。
 
 - **产品名称**：QuantclassClient
 - **技术主线**：Electron + React + TypeScript + Vite
@@ -86,13 +86,17 @@ src/
 │   └── global.css、index.css、themes.css、mdx.css、worker.ts
 ├── mcp-server/           # 独立 MCP Server（stdio 模式）
 │   ├── index.ts          # MCP Server 入口
-│   ├── tools.ts          # 注册 tools（42 个）
+│   ├── tools.ts          # 注册 tools（49 个）
 │   ├── resources.ts      # 注册 resources（2 个）
 │   ├── client.ts         # 连接 Hono 服务的 HTTP 客户端
 │   ├── paths.ts          # 路径解析与穿越校验
 │   ├── backtest-evaluator.ts、strategy-files.ts、strategy-validator.ts、factor-check.ts、
 │   ├── review-submitter.ts、research-run.ts、backtest-diagnostics.ts、validation-gate.ts、
-│   │   walkforward-eval.ts
+│   │   walkforward-eval.ts、compare-variants.ts、component-catalog.ts、knowledge-base.ts
+│   ├── research-loop.ts  # get_loop_state 状态机（RD 循环编排，phase 从可观察产物推导）
+│   ├── loop-playbook.ts  # 五角色 playbook（Researcher/Developer/Runner/Evaluator/Summarizer）
+│   ├── hypothesis-spec.ts # 假设规则书（注入 get_strategy_template 的 data.hypothesisSpecification）
+│   └── dev-walkforward-job.ts # dev walkforward 异步 job
 └── shared/               # 跨进程共享类型（main/preload/renderer 均可引用，见 shared/README.md）
     ├── lib/、types/
     └── constants.ts
@@ -113,6 +117,8 @@ src/
 - `mcp-deploy/`：MCP Server 部署模板与说明（`mcp-config.template.json`）。
 - `bin/`：`rebuild.js`（原生模块重建）、`remove.js` / `notarize.js`（electron-builder 钩子）。
 - `scripts/`：构建与校验脚本（下载 Python、打包 MCP bundle、校验 tool 注册等）。
+- `docs/quantclass-工作流.md`：整套研发工作流总览（策略研发闭环、数据、看板自动化的实际运行状态）。
+- `docs/superpowers/`：AI 研发闭环的工程文档——`plans/`（各机制设计文档，如 `2026-08-26-hypothesis-direction-mechanism.md`）、`runbook/`（`research-agent-runbook.md` 研究循环控制流、`config-py-manual.md`）、`issues/`、`specs/`。改动 `src/mcp-server/research-loop.ts` / `loop-playbook.ts` / `hypothesis-spec.ts` 前应先读对应设计文档与 runbook，保持 prompt 资产与状态机推导逻辑一致。
 
 ## 4. 开发与构建命令
 
@@ -190,7 +196,7 @@ pnpm verify:mcp-tools         # 校验 MCP tool 注册（scripts/verify-mcp-tool
 
 ### 5.2 Tool 分组
 
-当前 MCP Server 共注册 **42 个 tools**（`src/mcp-server/tools.ts`），分组如下：
+当前 MCP Server 共注册 **49 个 tools**（`src/mcp-server/tools.ts`）。`get_loop_state` 是多 Agent 编排入口：每轮先调它获取当前 phase、预算与对应角色的 playbook/dispatch 子代理 prompt（五角色流水线见 `src/mcp-server/loop-playbook.ts`）。研究闭环的控制流规范见 `docs/superpowers/runbook/research-agent-runbook.md`，机制设计见 `docs/superpowers/plans/`。分组如下：
 
 - **系统控制（7 个）**：
   - `get_system_status`：获取系统运行状态
@@ -220,13 +226,14 @@ pnpm verify:mcp-tools         # 校验 MCP tool 注册（scripts/verify-mcp-tool
   - `get_backtest_equity_curve`：回测资金曲线
   - `get_backtest_diagnostics`：回测诊断（基于资金曲线计算分年度收益与回撤区间，供 lesson 归因）
 
-- **策略开发闭环（13 个）**：
-  - `get_strategy_template`：获取策略开发模板（含可用因子清单）
+- **策略开发闭环（14 个）**：
+  - `get_strategy_template`：获取策略开发模板（含可用因子清单与 data.hypothesisSpecification 假设规则书）
   - `import_strategy`：导入策略
   - `set_strategy_weight`：设置库内策略组资金占比（单个/批量/一键隔离，三层同步）
   - `list_library_strategies`：列出库内策略组名称与权重
   - `get_strategy_workspace_root`：获取策略工作区根目录
   - `list_strategies`：列出策略 run/variant
+  - `list_factor_components`：枚举因子库/截面因子库可用组件
   - `read_strategy_file`：读取策略文件
   - `write_strategy_file`：写入策略文件
   - `write_factor_file`：写入自定义因子（时序/截面，AST 白名单静态检查后落盘，自动补 __init__.py）
@@ -235,12 +242,17 @@ pnpm verify:mcp-tools         # 校验 MCP tool 注册（scripts/verify-mcp-tool
   - `compare_backtest_variants`：按阈值对比多个 variant 绩效并返回最优
   - `submit_strategy_for_review`：生成候选策略报告等待人工确认
 
-- **研究工作流（7 个）**：
+- **研究工作流（13 个）**：
   - `create_research_run`：创建研究 run（brief.json：目标、阈值、回测区间、进化轮数；可选 walkforward 多窗口配置）
-  - `record_experiment`：追加实验记录到 trace.jsonl（支持 fromLatestBacktest 自动抓绩效与内核版本；verdict/complexity 缺省自动判定与统计；entry.type 区分 dev/validation；brief 含 evolving_n 时返回迭代预算。brief 配置 walkforward 后，带绩效的 dev 条目会被拦截并导向 run_dev_walkforward，仅放行无绩效的失败记录）
+  - `get_loop_state`：RD 循环编排状态机（从可观察产物推导当前阶段，返回预算/plateau/下一步动作清单/角色 playbook/dispatch 子代理分派指令；多 Agent 编排入口）
+  - `record_experiment`：追加实验记录到 trace.jsonl（支持 fromLatestBacktest 自动抓绩效与内核版本；verdict/complexity 缺省自动判定与统计；entry.type 区分 dev/validation；brief 含 evolving_n 时返回迭代预算。brief 配置 walkforward 后，带绩效的 dev 条目会被拦截并导向 run_dev_walkforward，仅放行无绩效的失败记录。entry 支持 action 假设动作分类——tune_param/combine/new_factor/new_direction，new_factor 必须附 factorSpec.factorName+formulation；observations/hypothesisEvaluation 为结构化结论字段，后验条目缺失时返回 warning）
+  - `amend_experiment`：修订 trace 最新条目（Summarizer 后验回填 observations/hypothesisEvaluation/lesson/nextHypothesis）
   - `get_experiment_trace`：读取实验 trace（支持 tail 截断）
   - `get_run_summary`：汇总实验数、SOTA、validation 结果、阈值差距与指标趋势
+  - `record_knowledge` / `get_knowledge`：跨 run 知识库读写（旋钮级发现的结构化沉淀）
+  - `close_run`：关闭 run（achieved 要求存在 SOTA；幂等保护，force=true 可改判）
   - `run_dev_walkforward`：dev 迭代的 walkforward 稳健性检验（读 brief.walkforward.windows→快照回测配置→逐窗口回测并评估→恢复原配置→按最劣窗口口径汇总写入 type=dev 的 trace 条目，消耗 1 轮迭代预算；失败窗口 score 计 0，全部失败不写 trace）
+  - `get_dev_walkforward_job`：查询 dev walkforward 异步 job 进度
   - `run_validation`：启动 validation 闸门（快照当前回测配置→切到 brief.validation 窗口→异步回测）
   - `complete_validation`：完成 validation 闸门（恢复原回测配置→记录 type=validation 的样本外结果）
 
@@ -313,13 +325,14 @@ pnpm verify:mcp-tools         # 校验 MCP tool 注册（scripts/verify-mcp-tool
 
 ## 7. 测试
 
-测试使用 Node.js 内置测试运行器（`node --test`），通过 `--experimental-strip-types` 直接运行 TypeScript 测试文件。
+测试使用 Node.js 内置测试运行器（`node --test`），通过 `--experimental-strip-types` 与 `--experimental-test-module-mocks` 直接运行 TypeScript 测试文件。
 
 ```bash
 pnpm test:mcp                 # 运行 tests/mcp-server/**/*.test.ts
+node --test --experimental-strip-types tests/mcp-server/research-loop.test.ts   # 单文件
 ```
 
-当前测试覆盖（`tests/mcp-server/`，共 12 个测试文件）：
+当前测试覆盖（`tests/mcp-server/`，共 17 个测试文件）：
 
 - `sanity.test.ts`
 - `paths.test.ts`
@@ -332,7 +345,12 @@ pnpm test:mcp                 # 运行 tests/mcp-server/**/*.test.ts
 - `tools.test.ts`
 - `review-submitter.test.ts`
 - `research-run.test.ts`
+- `research-loop.test.ts`
 - `walkforward-eval.test.ts`
+- `compare-variants.test.ts`
+- `component-catalog.test.ts`
+- `dev-walkforward-job.test.ts`
+- `knowledge-base.test.ts`
 
 新增业务逻辑（尤其是 MCP Server 下的纯函数）应补充对应测试。
 

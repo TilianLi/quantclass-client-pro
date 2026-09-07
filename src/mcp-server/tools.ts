@@ -26,8 +26,11 @@ import {
 	startDevWalkforwardJob,
 } from "./dev-walkforward-job.js"
 import { checkFactorSource } from "./factor-check.js"
+import { HYPOTHESIS_SPECIFICATION } from "./hypothesis-spec.ts"
 import { getKnowledge, recordKnowledge } from "./knowledge-base.ts"
+import { getLoopState } from "./research-loop.ts"
 import {
+	amendExperiment,
 	closeRun,
 	createResearchRun,
 	experimentEntrySchema,
@@ -634,15 +637,39 @@ export function registerTools(server: McpServer): void {
 			runId: z.string().describe("Run ID"),
 			variantId: z.string().describe("被检验的 variant ID"),
 			hypothesis: z.string().describe("本次实验假设"),
+			action: z
+				.enum(["tune_param", "combine", "new_factor", "new_direction"])
+				.optional()
+				.describe(
+					"假设动作类型：tune_param=调参、combine=新组合、new_factor=新因子（需 factorSpec）、new_direction=新方向；规则见 get_strategy_template 的 hypothesisSpecification",
+				),
+			factorSpec: z
+				.object({
+					factorName: z.string().min(1).describe("因子名（不含 .py 后缀）"),
+					formulation: z.string().min(1).describe("计算定义/公式"),
+					variables: z.string().optional().describe("依赖变量说明"),
+				})
+				.optional()
+				.describe("action=new_factor 时必填：新因子规格"),
 			changes: z.string().optional().describe("相对上一版的变更"),
 			lesson: z.string().optional().describe("实验结论教训"),
 		},
-		async ({ runId, variantId, hypothesis, changes, lesson }) => {
+		async ({
+			runId,
+			variantId,
+			hypothesis,
+			action,
+			factorSpec,
+			changes,
+			lesson,
+		}) => {
 			try {
 				const result = await startDevWalkforwardJob({
 					runId,
 					variantId,
 					hypothesis,
+					action,
+					factorSpec,
 					changes,
 					lesson,
 				})
@@ -690,6 +717,67 @@ export function registerTools(server: McpServer): void {
 	)
 
 	server.tool(
+		"get_loop_state",
+		"RD 循环编排状态机：从可观察产物（brief/trace/dev-walkforward-job/validation-state/variant 目录/评审报告）推导 run 当前阶段——await_hypothesis（提假设）/ await_backtest（实现+回测）/ walkforward_running / await_summary（回填结构化结论）/ await_validation / await_review / await_close / closed。返回迭代预算、plateau（连续2轮非SOTA，触发规则书转向条款）、nextVariantId、SOTA、下一步动作清单、当前阶段角色 playbook，以及 dispatch——注入运行时上下文后可直接转发的子代理分派指令（role/prompt/expects/onReturn，覆盖 Researcher/Developer/Evaluator 三个 LLM 角色；Runner 为确定性步骤见 nextActions）。多 Agent 编排入口：每轮先调它，按 dispatch 分派子代理。",
+		{
+			runId: z.string().describe("Run ID"),
+		},
+		async ({ runId }) => {
+			try {
+				const result = getLoopState(runId)
+				return {
+					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+				}
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `获取循环状态失败: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
+					isError: true,
+				}
+			}
+		},
+	)
+
+	server.tool(
+		"amend_experiment",
+		"修订最近一次实验记录（仅限 trace 最新条目，且其 variantId 必须与传入一致）：用于 walkforward 回测完成后由 Summarizer 角色回填后验结论——run_dev_walkforward 落盘时 lesson 是启动前的预测文本。patch 至少含一项：observations（数据事实：各窗口指标/与 SOTA 对比/诊断归因）、hypothesisEvaluation（假设判定：被支持/证伪及原因）、lesson（以实际结论替换预测文本）、nextHypothesis（修正下一轮假设种子）。lesson 传占位文本会被拒绝。",
+		{
+			runId: z.string().describe("Run ID"),
+			variantId: z.string().describe("待修订条目的 variantId（须为最新条目）"),
+			patch: z
+				.object({
+					observations: z.string().min(1).optional(),
+					hypothesisEvaluation: z.string().min(1).optional(),
+					lesson: z.string().min(1).optional(),
+					nextHypothesis: z.string().min(1).optional(),
+				})
+				.describe("待回填字段，至少一项"),
+		},
+		async ({ runId, variantId, patch }) => {
+			try {
+				const result = amendExperiment(runId, variantId, patch)
+				return {
+					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+				}
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `修订实验记录失败: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
+					isError: true,
+				}
+			}
+		},
+	)
+
+	server.tool(
 		"get_backtest_result",
 		"查询回测选股结果，返回最新一次回测的选股明细（选股日期、股票代码、目标资金占比、预计股数等）。需先执行 run_backtest 生成结果。",
 		{},
@@ -719,11 +807,21 @@ export function registerTools(server: McpServer): void {
 
 	server.tool(
 		"get_strategy_template",
-		"获取策略开发模板，包括 config.py 格式说明、策略库目录结构、必选/可选变量说明。AI Agent 开发策略前应先调用此工具了解格式要求。",
+		"获取策略开发模板，包括 config.py 格式说明、策略库目录结构、必选/可选变量说明；响应 data.hypothesisSpecification 为假设规则书（action 四选一、探索纪律、结构化结论要求），提假设前必读。",
 		{},
 		async () => {
 			try {
-				const result = await get("/mcp/strategy/template")
+				const result = (await get("/mcp/strategy/template")) as Record<
+					string,
+					unknown
+				>
+				// 假设规则书在 MCP 侧合并进响应（与工具同 bundle 发布），
+				// 主进程模板端点不变
+				const data = result?.data
+				if (data && typeof data === "object" && !Array.isArray(data)) {
+					;(data as Record<string, unknown>).hypothesisSpecification =
+						HYPOTHESIS_SPECIFICATION
+				}
 				return {
 					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
 				}
@@ -1484,7 +1582,7 @@ export function registerTools(server: McpServer): void {
 
 	server.tool(
 		"record_experiment",
-		"记录一次实验到 run 的 trace.jsonl（假设、变更、绩效、评估、结论、教训）。ts 缺省时自动填当前时间。fromLatestBacktest=true 时自动把最近一次回测的绩效数值填入 metrics（缺省时）、并把内核版本填入 kernelVersion（缺省时），避免手工誊抄。verdict 缺省时自动判定（validation 条目→completed；无 metrics/evaluation→failed；成为当前最优→sota，否则 completed）；complexity 缺省时自动从 variant 的 config.py 统计旋钮数；entry.type 支持 dev（默认，计入迭代预算与 SOTA）/ validation（终局样本外验证，不进 SOTA 与趋势）。brief 含 evolving_n 时响应附带 budget（used/remaining）；迭代预算是硬闸门——dev 条目达 evolving_n 上限后写入前直接报错（提示 close_run 或提高预算），validation 条目不受限。指标口径：calmar_ratio 为规范名，sharpe_ratio 是兼容别名。注意：brief 配置 walkforward 后，带绩效的 dev 条目必须经 run_dev_walkforward 写入（含分窗口明细），本工具仅放行无绩效的失败记录。entry 新增可选字段：basedOn（分叉父 variantId）、hypothesisSource（假设来源引用，推荐 knowledge:<id>/trace:<runId>/<variantId>）、nextHypothesis（预埋下一轮假设种子）。lesson 传占位文本（待回填/TBD 等）会被拒绝；假设与历史高度相似时返回 warnings（不阻断）。",
+		"记录一次实验到 run 的 trace.jsonl（假设、变更、绩效、评估、结论、教训）。ts 缺省时自动填当前时间。fromLatestBacktest=true 时自动把最近一次回测的绩效数值填入 metrics（缺省时）、并把内核版本填入 kernelVersion（缺省时），避免手工誊抄。verdict 缺省时自动判定（validation 条目→completed；无 metrics/evaluation→failed；成为当前最优→sota，否则 completed）；complexity 缺省时自动从 variant 的 config.py 统计旋钮数；entry.type 支持 dev（默认，计入迭代预算与 SOTA）/ validation（终局样本外验证，不进 SOTA 与趋势）。brief 含 evolving_n 时响应附带 budget（used/remaining）；迭代预算是硬闸门——dev 条目达 evolving_n 上限后写入前直接报错（提示 close_run 或提高预算），validation 条目不受限。指标口径：calmar_ratio 为规范名，sharpe_ratio 是兼容别名。注意：brief 配置 walkforward 后，带绩效的 dev 条目必须经 run_dev_walkforward 写入（含分窗口明细），本工具仅放行无绩效的失败记录。entry 新增可选字段：basedOn（分叉父 variantId）、hypothesisSource（假设来源引用，推荐 knowledge:<id>/trace:<runId>/<variantId>）、nextHypothesis（预埋下一轮假设种子）、action（假设动作类型 tune_param/combine/new_factor/new_direction，new_factor 必须附 factorSpec.factorName+formulation 否则拒绝写入）、observations/hypothesisEvaluation（结构化结论：数据事实与假设判定，带 evaluation 的后验条目缺失时返回 warning 提示）。lesson 传占位文本（待回填/TBD 等）会被拒绝；假设与历史高度相似时返回 warnings（不阻断）。",
 		{
 			runId: z.string().describe("Run ID"),
 			entry: experimentEntrySchema.describe("实验记录"),

@@ -38,6 +38,8 @@ const REQUIRED_TOOLS = [
 	"run_walkforward",
 	"run_dev_walkforward",
 	"get_dev_walkforward_job",
+	"get_loop_state",
+	"amend_experiment",
 	"get_backtest_diagnostics",
 	"run_validation",
 	"complete_validation",

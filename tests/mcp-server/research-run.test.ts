@@ -15,6 +15,7 @@ const TMP = mkdtempSync(join(tmpdir(), "qc-research-"))
 process.env.QUANTCLASS_AGENT_WORKSPACE = TMP
 
 const {
+	amendExperiment,
 	closeRun,
 	createResearchRun,
 	recordExperiment,
@@ -715,5 +716,153 @@ describe("research-run walkforward", () => {
 		})
 		assert.strictEqual(entry.type, "validation")
 		assert.strictEqual(entry.windows, undefined)
+	})
+
+	it("accepts action/factorSpec and echoes them back", () => {
+		const { entry } = recordExperiment("run-action", {
+			variantId: "v1",
+			hypothesis: "构造换手率变化率因子捕捉异常放量后的反转",
+			action: "new_factor",
+			factorSpec: {
+				factorName: "换手率变化率20",
+				formulation: "std(turnover, 20) / mean(turnover, 20)",
+				variables: "turnover=日换手率",
+			},
+			verdict: "failed",
+			lesson: "因子代码待实现",
+		})
+		assert.strictEqual(entry.action, "new_factor")
+		assert.strictEqual(entry.factorSpec?.factorName, "换手率变化率20")
+		// 读取侧透传（trace 落盘 → 重新读出字段不丢）
+		const { entries } = getExperimentTrace("run-action")
+		assert.strictEqual(entries[0].action, "new_factor")
+		assert.strictEqual(
+			entries[0].factorSpec?.formulation,
+			"std(turnover, 20) / mean(turnover, 20)",
+		)
+	})
+
+	it("rejects new_factor action without factorSpec (write-only gate)", () => {
+		assert.throws(
+			() =>
+				recordExperiment("run-action", {
+					variantId: "v2",
+					hypothesis: "新因子但忘了给公式",
+					action: "new_factor",
+					verdict: "failed",
+				}),
+			/factorSpec/,
+		)
+		// 其他 action 不要求 factorSpec
+		const { entry } = recordExperiment("run-action", {
+			variantId: "v3",
+			hypothesis: "收紧波动率过滤",
+			action: "tune_param",
+			verdict: "failed",
+		})
+		assert.strictEqual(entry.action, "tune_param")
+		// 历史条目无 action 字段，读取不受影响
+		appendFileSync(
+			join(TMP, "run-action", "trace.jsonl"),
+			`${JSON.stringify({ variantId: "v9", hypothesis: "legacy" })}\n`,
+		)
+		const { entries } = getExperimentTrace("run-action")
+		assert.ok(
+			entries.some((e) => e.variantId === "v9" && e.action === undefined),
+		)
+	})
+
+	it("warns when evaluated entry lacks structured observations/hypothesisEvaluation", () => {
+		// 带 evaluation 的后验条目缺结构化字段 → 非阻断 warning
+		const res = recordExperiment("run-structured", {
+			variantId: "v1",
+			hypothesis: "低波动过滤压回撤",
+			metrics: { annual_return_pct: 12 },
+			evaluation: { passed: false, score: 0.5 },
+			lesson: "回撤仍超标",
+		})
+		assert.ok(res.warnings?.some((w) => w.includes("observations")))
+		// 补齐结构化字段 → 无该 warning
+		const res2 = recordExperiment("run-structured", {
+			variantId: "v2",
+			hypothesis: "收紧低波动过滤至前20%",
+			metrics: { annual_return_pct: 13 },
+			evaluation: { passed: false, score: 0.5 },
+			lesson: "回撤改善但仍超标",
+			observations: "回撤 -28%→-26%，年化 12%→13%",
+			hypothesisEvaluation: "方向被支持，幅度不足",
+		})
+		assert.ok(!res2.warnings || res2.warnings.length === 0)
+	})
+
+	it("does not warn structured fields for walkforward entries (windows present)", () => {
+		const res = recordExperiment("run-structured-wf", {
+			variantId: "v1",
+			hypothesis: "walkforward 条目的 lesson 是预测文本，不适用后验结构",
+			metrics: { annual_return_pct: 12 },
+			evaluation: { passed: true, score: 1 },
+			windows: [
+				{
+					window: { start_date: "2023-01-01", end_date: "2023-12-31" },
+					ok: true,
+					metrics: { annual_return_pct: 12 },
+					evaluation: { passed: true, score: 1 },
+				},
+				{
+					window: { start_date: "2024-01-01", end_date: "2024-12-31" },
+					ok: true,
+					metrics: { annual_return_pct: 15 },
+					evaluation: { passed: true, score: 1 },
+				},
+			],
+		})
+		assert.ok(!res.warnings || res.warnings.length === 0)
+	})
+
+	it("amend_experiment fills post-hoc fields on latest entry only", () => {
+		recordExperiment("run-amend", {
+			variantId: "v1",
+			hypothesis: "基线",
+			metrics: { annual_return_pct: 20 },
+			evaluation: { passed: true, score: 1 },
+			lesson: "基线达标",
+		})
+		recordExperiment("run-amend", {
+			variantId: "v2",
+			hypothesis: "改进版",
+			metrics: { annual_return_pct: 22 },
+			evaluation: { passed: true, score: 1 },
+			lesson: "预测性 lesson（job 启动前写入）",
+			observations: "已有字段不被覆盖",
+		})
+		// 修订最新条目：回填后验结论
+		const res = amendExperiment("run-amend", "v2", {
+			hypothesisEvaluation: "假设被支持：年化 20%→22%",
+		})
+		assert.strictEqual(
+			res.entry.hypothesisEvaluation,
+			"假设被支持：年化 20%→22%",
+		)
+		assert.strictEqual(res.entry.observations, "已有字段不被覆盖")
+		// 持久化且不影响旧条目
+		const { entries } = getExperimentTrace("run-amend")
+		assert.strictEqual(entries.length, 2)
+		assert.strictEqual(entries[0].observations, undefined)
+		assert.strictEqual(
+			entries[1].hypothesisEvaluation,
+			"假设被支持：年化 20%→22%",
+		)
+		// 只能修订最新条目
+		assert.throws(
+			() => amendExperiment("run-amend", "v1", { lesson: "改写旧条目" }),
+			/最近一次/,
+		)
+		// 空 patch 拒绝
+		assert.throws(() => amendExperiment("run-amend", "v2", {}), /至少/)
+		// 占位 lesson 拒绝
+		assert.throws(
+			() => amendExperiment("run-amend", "v2", { lesson: "TBD" }),
+			/占位/,
+		)
 	})
 })

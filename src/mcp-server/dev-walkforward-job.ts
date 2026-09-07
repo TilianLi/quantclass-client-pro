@@ -25,6 +25,7 @@ import { evaluateBacktest } from "./backtest-evaluator.ts"
 import { get, post, put } from "./client.ts"
 import {
 	type BriefFile,
+	type ExperimentEntry,
 	getExperimentTrace,
 	getResearchBrief,
 	recordExperiment,
@@ -81,6 +82,9 @@ export interface DevWalkforwardJobParams {
 	hypothesis: string
 	changes?: string
 	lesson?: string
+	/** 假设动作类型（透传至 trace 条目），new_factor 时 factorSpec 必填 */
+	action?: ExperimentEntry["action"]
+	factorSpec?: ExperimentEntry["factorSpec"]
 }
 
 function jobPath(runId: string): string {
@@ -116,6 +120,13 @@ export function readDevWalkforwardJob(runId: string): DevWalkforwardJob {
 		)
 	}
 	return job
+}
+
+/** 非抛错版读取（供 getLoopState 等状态推导使用）：无 job 文件返回 null */
+export function tryReadDevWalkforwardJob(
+	runId: string,
+): DevWalkforwardJob | null {
+	return tryReadJob(runId)
 }
 
 function sleep(ms: number): Promise<void> {
@@ -234,6 +245,8 @@ export async function executeDevWalkforwardJob(
 		const recorded = recordExperiment(job.runId, {
 			variantId: job.variantId,
 			hypothesis: params.hypothesis,
+			action: params.action,
+			factorSpec: params.factorSpec,
 			changes: params.changes,
 			lesson: params.lesson,
 			metrics: summary.metrics,
