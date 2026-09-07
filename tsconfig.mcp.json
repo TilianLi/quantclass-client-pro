@@ -1,0 +1,12 @@
+{
+	"extends": "@electron-toolkit/tsconfig/tsconfig.node.json",
+	"compilerOptions": {
+		"outDir": "./resources/mcp-server",
+		"rootDir": "./src/mcp-server",
+		"module": "Node16",
+		"moduleResolution": "NodeNext",
+		"allowImportingTsExtensions": true,
+		"noEmit": true
+	},
+	"include": ["src/mcp-server/**/*"]
+}

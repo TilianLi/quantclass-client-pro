@@ -9,8 +9,10 @@
  */
 
 import { execSync } from "node:child_process"
+import { randomBytes } from "node:crypto"
 import fs, { promises as fsPromises, readdirSync, unlinkSync } from "node:fs"
 import net from "node:net"
+import os from "node:os"
 import path from "node:path"
 import util from "node:util"
 import store from "@/main/store/index.js"
@@ -407,6 +409,74 @@ export const killAllKernalByName = async (
 }
 
 /**
+ * 将服务器端口号写入 ~/.quantclass/mcp-port 供 MCP Server 发现
+ *
+ * 安全要点：
+ * - 父目录权限设为 0o700，仅当前用户可访问
+ * - 端口文件权限设为 0o600，仅当前用户可读写
+ * - 写入采用 tmp + rename 的原子模式，避免并发读到半写文件
+ */
+function writeMcpPortFile(port: number): void {
+	try {
+		const mcpDir = path.join(os.homedir(), ".quantclass")
+		if (!fs.existsSync(mcpDir)) {
+			fs.mkdirSync(mcpDir, { recursive: true, mode: 0o700 })
+		}
+		const portFile = path.join(mcpDir, "mcp-port")
+		const tmpFile = `${portFile}.tmp`
+		fs.writeFileSync(tmpFile, String(port), { encoding: "utf-8", mode: 0o600 })
+		fs.renameSync(tmpFile, portFile)
+		// -- Windows 下 fs.chmod 仅作为提示，POSIX 系统生效
+		if (typeof fs.chmodSync === "function") {
+			try {
+				fs.chmodSync(portFile, 0o600)
+			} catch (e) {
+				logger.warn(`[mcp] 设置端口文件权限失败（Windows 可忽略）: ${e}`)
+			}
+		}
+		logger.info(`[mcp] 端口文件已写入: ${portFile}`)
+	} catch (error) {
+		logger.error(`[mcp] 写入端口文件失败: ${error}`)
+	}
+}
+
+/**
+ * MCP 鉴权 token，启动时生成，供 /mcp/* 路由校验。
+ * 独立 MCP Server 进程通过读取 ~/.quantclass/mcp-token 获取。
+ */
+let mcpToken: string | null = null
+
+export function getMcpToken(): string | null {
+	return mcpToken
+}
+
+/**
+ * 写入 MCP 鉴权 token 文件（~/.quantclass/mcp-token），安全策略同端口文件。
+ */
+function writeMcpTokenFile(token: string): void {
+	try {
+		const mcpDir = path.join(os.homedir(), ".quantclass")
+		if (!fs.existsSync(mcpDir)) {
+			fs.mkdirSync(mcpDir, { recursive: true, mode: 0o700 })
+		}
+		const tokenFile = path.join(mcpDir, "mcp-token")
+		const tmpFile = `${tokenFile}.tmp`
+		fs.writeFileSync(tmpFile, token, { encoding: "utf-8", mode: 0o600 })
+		fs.renameSync(tmpFile, tokenFile)
+		if (typeof fs.chmodSync === "function") {
+			try {
+				fs.chmodSync(tokenFile, 0o600)
+			} catch (e) {
+				logger.warn(`[mcp] 设置 token 文件权限失败（Windows 可忽略）: ${e}`)
+			}
+		}
+		logger.info(`[mcp] token 文件已写入: ${tokenFile}`)
+	} catch (error) {
+		logger.error(`[mcp] 写入 token 文件失败: ${error}`)
+	}
+}
+
+/**
  * 在可用端口上启动服务器
  * @param initialPort - 初始尝试的端口号
  * @param server - 服务器实例
@@ -437,6 +507,14 @@ export const startServerOnAvailablePort = async (
 			})
 			// if (platform.isWindows) await startHeartbeatCheck()
 			logger.info("启动心跳检查")
+
+			// 写入端口文件供 MCP Server 发现
+			writeMcpPortFile(port)
+
+			// 生成并写入 MCP 鉴权 token，保护 /mcp/* 路由免受本机未授权调用
+			mcpToken = randomBytes(32).toString("hex")
+			writeMcpTokenFile(mcpToken)
+
 			return port
 		}
 		logger.warn(`端口 ${port} 不可用,尝试下一个端口`)

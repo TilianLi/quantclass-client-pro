@@ -43,6 +43,10 @@ interface SystemState {
 	job: schedule.Job | null
 	minDataJob: schedule.Job | null
 	minDataMode: "fast" | "stable"
+	// -- MCP 可调开关：准确/模糊数据获取偏好（供 /mcp/status 与 toggle 读写；
+	// -- v4.0.x 的调度执行逻辑由 period_offset.csv 交易日历决定，不以此为准）
+	minDataAccurate: boolean
+	minDataFuzzy: boolean
 	isOnline: boolean
 }
 
@@ -54,6 +58,8 @@ const systemState: SystemState = {
 	job: null,
 	minDataJob: null,
 	minDataMode: "fast",
+	minDataAccurate: true,
+	minDataFuzzy: true,
 	isOnline: true,
 }
 
@@ -176,8 +182,15 @@ const setupScheduler = async (): Promise<schedule.Job> => {
 				`[scheduler-fuel] 数据模块定时任务: ${dataModuleTimes}, 当前时间: ${current15m}, 是否更新: ${isScheduleDataModule}`,
 			)
 			const isFuelBusy = await isKernalBusy("fuel")
+			// -- T-20260906-10：zeus 回测进行中时本轮数据更新让行（写/读 CSV 竞态会致 zeus
+			//    静默死亡）；下轮 15 分钟自动再试，不改变盘中 fuel/aqua 并行的原设计
+			const isZeusBusy = await isKernalBusy("zeus")
 			if (isFuelBusy && !allowConcurrentFuelTasks) {
 				logger.info("[fuel] 内核正忙，跳过本轮调度")
+			} else if (isZeusBusy) {
+				logger.info(
+					"[fuel] zeus 回测进行中，跳过本轮数据更新（T-20260906-10 防竞态）",
+				)
 			} else if (!isScheduleDataModule) {
 				logger.info("[fuel] 非定时更新数据时间，跳过本轮数据更新")
 			} else {
@@ -364,8 +377,7 @@ async function shouldRunMinDataSchedule(): Promise<
 	if (calendar.length === 0) {
 		return {
 			run: false,
-			message:
-				"[min-data] 未读到 period_offset.csv 交易日历，跳过本轮",
+			message: "[min-data] 未读到 period_offset.csv 交易日历，跳过本轮",
 		}
 	}
 
@@ -456,9 +468,15 @@ const setupMinDataScheduler = () => {
 const setAutoMinData = (options: {
 	isOn: boolean
 	mode?: "fast" | "stable"
+	autoAccurate?: boolean
+	autoFuzzy?: boolean
 }) => {
 	systemState.isSetAutoMinData = options.isOn
 	if (options.mode !== undefined) systemState.minDataMode = options.mode
+	if (options.autoAccurate !== undefined)
+		systemState.minDataAccurate = options.autoAccurate
+	if (options.autoFuzzy !== undefined)
+		systemState.minDataFuzzy = options.autoFuzzy
 
 	logger.info(
 		`[min-data] 自动更新: ${systemState.isSetAutoMinData}, 模式: ${systemState.minDataMode}`,

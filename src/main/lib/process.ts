@@ -195,6 +195,202 @@ export class ProcessManage {
 
 export const process_manager = new ProcessManage()
 
+/**
+ * 异步回测任务追踪。
+ * 用于 MCP 等场景：启动内核后立即返回 taskId，随后通过 taskId 轮询状态与日志。
+ */
+export interface BacktestTask {
+	taskId: string
+	pid: number
+	kernel: "aqua" | "zeus"
+	action: string
+	status: "running" | "success" | "error"
+	exitCode: number | null
+	stdoutTail: string[]
+	stderrTail: string[]
+	startedAt: string
+	finishedAt?: string
+}
+
+class BacktestTaskManager {
+	private tasks = new Map<string, BacktestTask>()
+	private maxTailLines = 200
+
+	createTask(
+		pid: number,
+		kernel: "aqua" | "zeus",
+		action: string,
+	): BacktestTask {
+		const taskId = `${kernel}_${pid}`
+		const task: BacktestTask = {
+			taskId,
+			pid,
+			kernel,
+			action,
+			status: "running",
+			exitCode: null,
+			stdoutTail: [],
+			stderrTail: [],
+			startedAt: dayjs().format("YYYY-MM-DD HH:mm:ss"),
+		}
+		this.tasks.set(taskId, task)
+		return task
+	}
+
+	getTask(taskId: string): BacktestTask | undefined {
+		return this.tasks.get(taskId)
+	}
+
+	appendStdout(taskId: string, line: string) {
+		const task = this.tasks.get(taskId)
+		if (!task) return
+		task.stdoutTail.push(line)
+		if (task.stdoutTail.length > this.maxTailLines) {
+			task.stdoutTail.shift()
+		}
+	}
+
+	appendStderr(taskId: string, line: string) {
+		const task = this.tasks.get(taskId)
+		if (!task) return
+		task.stderrTail.push(line)
+		if (task.stderrTail.length > this.maxTailLines) {
+			task.stderrTail.shift()
+		}
+	}
+
+	finishTask(taskId: string, exitCode: number) {
+		const task = this.tasks.get(taskId)
+		if (!task) return
+		task.status = exitCode === 0 ? "success" : "error"
+		task.exitCode = exitCode
+		task.finishedAt = dayjs().format("YYYY-MM-DD HH:mm:ss")
+	}
+
+	getAllTasks(): BacktestTask[] {
+		return Array.from(this.tasks.values())
+	}
+}
+
+export const backtest_task_manager = new BacktestTaskManager()
+
+/**
+ * 以 detached 方式启动内核，返回 taskId，不阻塞等待进程结束。
+ * stdout/stderr 会追加到 BacktestTaskManager，供后续轮询。
+ */
+export const execBinDetached = async (
+	args: string[],
+	action: string,
+	kernel: "aqua" | "zeus",
+	extraEnv?: string,
+): Promise<BacktestTask> => {
+	try {
+		const api_key = await store.getSetting("api_key", "")
+		const hid = await store.getSetting("hid", "")
+		const userAccount = await userStore.getUserAccount()
+
+		const isAnonymous = (!api_key && !hid) || !userAccount?.isLoggedIn
+		const isAllowed = userAccount?.isMember
+		if (isAnonymous) {
+			throw new Error(`[exec-${kernel}] 未登录，不调用内核`)
+		}
+		if (!isAllowed) {
+			throw new Error(`[exec-${kernel}] 非分享会，不调用内核`)
+		}
+
+		const binPath = await getKernalPath(kernel)
+		const isKernalExist = fs.existsSync(binPath)
+		if (!isKernalExist) {
+			throw new Error(`[exec-${kernel}] 内核不存在，请先下载`)
+		}
+
+		if (await isKernalRunning(kernel)) {
+			throw new Error(`[exec-${kernel}] 仍在运行中`)
+		}
+
+		if (platform.isMacOS) exec(`chmod +x ${binPath}`)
+
+		const fuelCodePath = await store.getAllDataPath(["code"])
+		const fuelProTradingPath = await store.getAllDataPath(["real_trading"])
+
+		process.env.FUEL_CODE_PATH = fuelCodePath
+		process.env.FUEL_CLIENT_CONFIG_PATH = CONFIG_PATH
+		process.env.FUEL_PRO_TRADING_PATH = fuelProTradingPath
+		process.env.ROCKET_STR_INFO_PATH = ROCKET_STR_INFO_PATH
+		process.env.PYTHONPATH = fuelCodePath
+		process.env.PYTHON8 = "1"
+		process.env.PYTHONUNBUFFERED = "1"
+		process.env.PYTHONIOENCODING = "utf8"
+		process.env.USE_FUZZY = _store.get(
+			"real_market_config.use_fuzzy",
+			"1",
+		) as string
+		process.env.USE_OPEN_SELL = _store.get(
+			"real_market_config.use_open_sell",
+			"0",
+		) as string
+		process.env.FUEL_TEMP_FILE_PATH = extraEnv ?? ""
+
+		const childProcess = process_manager.spawnProcess(
+			binPath,
+			args,
+			{ env: process.env },
+			action,
+			kernel,
+		)
+		if (!childProcess?.pid) {
+			throw new Error(`[exec-${kernel}] 创建进程失败`)
+		}
+
+		const task = backtest_task_manager.createTask(
+			childProcess.pid,
+			kernel,
+			action,
+		)
+
+		childProcess.stdout.on("data", (data: any) => {
+			const lines = `${data.toString("utf8")}`.split("\n").filter(Boolean)
+			for (const line of lines) {
+				backtest_task_manager.appendStdout(task.taskId, line)
+				const mainWindow = windowManager.getWindow()
+				const terminalWindow = windowManager.getWindowById("terminal")
+				if (mainWindow?.webContents) {
+					mainWindow.webContents.send(
+						"send-python-output",
+						line,
+						kernel === "aqua" ? "realMarket" : "realMarket",
+					)
+					if (terminalWindow) {
+						terminalWindow.webContents.send(
+							"send-python-output",
+							line,
+							kernel === "aqua" ? "realMarket" : "realMarket",
+						)
+					}
+				}
+			}
+		})
+
+		childProcess.stderr.on("data", (data: any) => {
+			const lines = `${data.toString("utf8")}`.split("\n").filter(Boolean)
+			for (const line of lines) {
+				backtest_task_manager.appendStderr(task.taskId, line)
+				logger.error(`[${kernel}] ${action} 标准错误: ${line}`)
+			}
+		})
+
+		childProcess.on("close", (code: any) => {
+			logger.info(`[${kernel}] ${action} 以代码 ${code} 退出`)
+			backtest_task_manager.finishTask(task.taskId, code ?? -1)
+		})
+
+		return task
+	} catch (error) {
+		logger.error(`[exec-${kernel}] 内核 ${action} 执行时发生错误: ${error}`)
+		throw error
+	}
+}
+
 export const execBin = async (
 	args: string[],
 	action: string,

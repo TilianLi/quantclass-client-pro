@@ -13,7 +13,8 @@ import path from "node:path"
 import { app } from "electron"
 import Store from "electron-store"
 
-const store = new Store()
+// -- 默认配置 store，供全进程共享（dot-path 访问：real_market_config.account_id 等）
+export const store = new Store()
 // -- rocket 读取策略配置
 export const rStore = new Store({ name: "real_market_25" })
 

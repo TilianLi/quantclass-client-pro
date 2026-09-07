@@ -10,6 +10,7 @@
 
 import { AcceleratedDataSourceConfirmDialog } from "@/renderer/components/AcceleratedDataSourceConfirmDialog"
 import { DeleteMinDataTodayConfirmDialog } from "@/renderer/components/DeleteMinDataTodayConfirmDialog"
+import { McpStatusBadge } from "@/renderer/components/McpStatusBadge"
 import { MinDataExecConfirmDialog } from "@/renderer/components/MinDataExecConfirmDialog"
 import { MinDataTaskTable } from "@/renderer/components/MinDataTaskTable"
 import { SelectTabs } from "@/renderer/components/select-tabs"
@@ -212,6 +213,7 @@ const RealtimeData: FC = () => {
 					? "自动更新中"
 					: "点击启动自动更新数据，在交易时段内自动更新数据"}
 			</p>
+			<McpStatusBadge />
 
 			<div className="rounded-lg border bg-muted/30 px-4 py-3 text-sm">
 				<div className="flex items-center justify-between gap-4">

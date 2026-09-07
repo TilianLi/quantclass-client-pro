@@ -19,7 +19,9 @@ import {
 import { useAtomValue, useSetAtom } from "jotai"
 import { useCallback } from "react"
 
-const { VITE_BASE_URL } = import.meta.env
+// -- 本地构建/开发可能缺少 .env，回退到线上 API 地址（与 src/main/vars.ts 一致）
+const VITE_BASE_URL =
+	import.meta.env.VITE_BASE_URL || "https://api.quantclass.cn"
 
 /** 与右上角「点击登录」一致的打开登录窗口逻辑 */
 export function useOpenLoginWindow() {

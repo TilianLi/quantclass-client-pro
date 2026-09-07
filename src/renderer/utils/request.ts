@@ -8,7 +8,9 @@
  * See the LICENSE file and https://mariadb.com/bsl11/
  */
 
-const { VITE_BASE_URL } = import.meta.env
+// -- 本地构建/开发可能缺少 .env，回退到线上 API 地址（与 src/main/vars.ts 一致）
+const VITE_BASE_URL =
+	import.meta.env.VITE_BASE_URL || "https://api.quantclass.cn"
 const { getAccessToken, rendererLog } = window.electronAPI
 
 export const API_BASE = VITE_BASE_URL

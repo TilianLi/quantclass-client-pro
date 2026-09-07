@@ -13,6 +13,10 @@ extraResources:
     to: python
   - from: resources/parse_config.py
     to: parse_config.py
+  - from: resources/check_factor.py
+    to: check_factor.py
+  - from: resources/mcp-server
+    to: mcp-server
 extraFiles: build
 # beforeBuild: bin/rebuild.js
 afterPack: bin/remove.js

@@ -70,7 +70,9 @@ def main():
     except SyntaxError:
         result = {}
 
-    json.dump(make_serializable(result), sys.stdout, ensure_ascii=False)
+    output = json.dumps(make_serializable(result), ensure_ascii=False)
+    # 显式使用 UTF-8 写出，避免 Windows 终端默认编码（如 gbk）导致中文乱码
+    sys.stdout.buffer.write(output.encode("utf-8"))
 
 
 if __name__ == "__main__":

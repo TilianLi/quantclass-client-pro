@@ -13,6 +13,35 @@ const DEFAULT_PYTHON_VERSION = "3.11.15"
 const TAG = process.env.PYTHON_STANDALONE_TAG || DEFAULT_STANDALONE_TAG
 const PY_VERSION = process.env.PYTHON_VERSION || DEFAULT_PYTHON_VERSION
 
+/** 因子共线性分析脚本（resources/factor_collinearity.py）的运行时依赖 */
+const SCI_PACKAGES = ["pandas>=2.2,<3", "numpy>=2,<3"]
+
+function pythonExe(targetDir) {
+	return process.platform === "win32"
+		? path.join(targetDir, "python.exe")
+		: path.join(targetDir, "bin", "python3")
+}
+
+/** pandas/numpy 缺失时 pip 安装（幂等：已可 import 则跳过） */
+function ensureSciPackages(targetDir) {
+	const py = pythonExe(targetDir)
+	try {
+		execSync(`"${py}" -c "import pandas, numpy"`, { stdio: "ignore" })
+		console.log("[download-python] pandas/numpy 已就绪，跳过安装")
+		return
+	} catch {}
+	console.log("[download-python] 安装 pandas/numpy（因子共线性分析依赖）...")
+	try {
+		execSync(
+			`"${py}" -m pip install --no-input ${SCI_PACKAGES.map((p) => `"${p}"`).join(" ")}`,
+			{ stdio: "inherit" },
+		)
+	} catch {
+		console.error("[download-python] pandas/numpy 安装失败")
+		process.exit(1)
+	}
+}
+
 const GITHUB_PREFIX = `https://github.com/astral-sh/python-build-standalone/releases/download/${TAG}`
 
 const TRIPLE_MAP = {
@@ -83,8 +112,9 @@ function downloadAndExtract(platform, arch) {
 		fs.readFileSync(markerFile, "utf-8").trim() === `${PY_VERSION}+${TAG}`
 	) {
 		console.log(
-			`[download-python] ${arch}: 已存在 (${PY_VERSION}+${TAG})，跳过`,
+			`[download-python] ${arch}: 已存在 (${PY_VERSION}+${TAG})，跳过下载`,
 		)
+		ensureSciPackages(targetDir)
 		return
 	}
 
@@ -116,6 +146,7 @@ function downloadAndExtract(platform, arch) {
 	trimPython(targetDir)
 
 	fs.writeFileSync(markerFile, `${PY_VERSION}+${TAG}\n`)
+	ensureSciPackages(targetDir)
 	console.log(`[download-python] ${arch}: 完成`)
 }
 

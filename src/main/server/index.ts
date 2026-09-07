@@ -15,6 +15,7 @@ import { Hono } from "hono"
 import { logger as honoLogger } from "hono/logger"
 import { prettyJSON } from "hono/pretty-json"
 import { reportError } from "./controllers/error.js"
+import { mcpRouter } from "./controllers/mcp.js"
 import { createNotification } from "./controllers/notify.js"
 import { getProductStatus } from "./controllers/product.js"
 import { reportToast } from "./controllers/toast.js"
@@ -42,6 +43,9 @@ server.post("/toast", reportToast)
 
 // 通知中心：内核（fuel/rocket/fusion）发起的统一通知入口
 server.post("/notify", createNotification)
+
+// MCP API 路由
+server.route("/mcp", mcpRouter)
 
 // 心跳路由只在 Windows 下注册
 if (platform.isWindows) {
