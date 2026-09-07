@@ -294,7 +294,7 @@ mcpRouter.get("/trading/account", async (c: Context) => {
 })
 
 /**
- * GET /mcp/trading/info - 查询 Aqua 交易信息
+ * GET /mcp/trading/info - 查询 Fusion 交易信息
  */
 mcpRouter.get("/trading/info", async (c: Context) => {
 	const data = await getJsonDataFromFile(
@@ -368,7 +368,7 @@ async function findBacktestArtifact(
 /**
  * 三层同步设置策略组资金占比：
  * config.json（electron-store）、renderer localStorage（界面与启动全量同步源）、
- * real_market_25.json（zeus 实际读取的策略注册表）。
+ * real_market_25.json（fusion 实际读取的策略注册表）。
  * assignments 按组名指定目标权重；返回匹配组数与各层同步情况。
  */
 async function applyStrategyWeights(
@@ -446,7 +446,7 @@ async function applyStrategyWeights(
 		}
 	}
 
-	// -- 同步 real_market_25.json（zeus 实际读取的策略注册表）
+	// -- 同步 real_market_25.json（fusion 实际读取的策略注册表）
 	let rStoreSlots = 0
 	try {
 		for (const [key, entry] of Object.entries(rStore.store ?? {})) {
@@ -476,17 +476,17 @@ async function applyStrategyWeights(
 /**
  * POST /mcp/backtest/run - 执行策略回测
  *
- * 根据 libraryType 选择内核：选股→aqua，仓位管理→zeus。
+ * 4.2.1 起选股内核统一为 Fusion（替代 Aqua/Zeus），选股与仓位管理库均跑 fusion。
  * 回测是长耗时操作（可能几分钟到几十分钟），请求会阻塞至回测完成。
  * 回测期间不能同时运行实盘。
  *
- * body.only_backtest_name=true（仅 pos/zeus 有效）：pos 模式回测范围为全部
+ * body.only_backtest_name=true（仅 pos 库有效）：pos 模式回测范围为全部
  * weight>0 策略组的融合组合，开启后先将其他组权重临时置 0（三层同步），
  * 只回测当前 backtest_name 策略组，结束后无论成败自动恢复原权重。
  */
 mcpRouter.post("/backtest/run", async (c: Context) => {
 	const libraryType = store.get(LIBRARY_TYPE, "select") as string
-	const kernel = libraryType === "pos" ? "zeus" : "aqua"
+	const kernel = "fusion"
 
 	const body = (await c.req.json().catch(() => ({}))) as {
 		only_backtest_name?: boolean
@@ -620,8 +620,7 @@ mcpRouter.post("/backtest/run", async (c: Context) => {
  * 产物校验在 GET /mcp/backtest/task 侧完成（status=success 时校验本次产物）。
  */
 mcpRouter.post("/backtest/run-async", async (c: Context) => {
-	const libraryType = store.get(LIBRARY_TYPE, "select") as string
-	const kernel = libraryType === "pos" ? "zeus" : "aqua"
+	const kernel = "fusion"
 
 	// -- T-20260906-10：数据更新进行中拒绝启动回测（fuel 写 CSV 与内核读 CSV 竞态致静默死亡）
 	if (await isKernalBusy("fuel")) {
@@ -809,7 +808,7 @@ mcpRouter.get("/strategy/template", async (c: Context) => {
 		},
 		directoryStructure: {
 			description:
-				"config.py 所在目录下可包含以下子目录，导入时会复制到 real_trading/ 下。注意：因子库/信号库/截面因子库 的子目录下必须包含 __init__.py，否则 zeus 无法以模块方式导入。",
+				"config.py 所在目录下可包含以下子目录，导入时会复制到 real_trading/ 下。注意：因子库/信号库/截面因子库 的子目录下必须包含 __init__.py，否则 fusion 无法以模块方式导入。",
 			dirs: {
 				策略库: "策略 .py 文件目录（复制到 real_trading/策略库/）",
 				因子库:
@@ -1263,7 +1262,7 @@ mcpRouter.get("/strategy/library", async (c: Context) => {
  * - others_except: 一键隔离——除列出的组外全部设为 weight（通常为 0）
  *
  * 三层同步：config.json（electron-store）、renderer localStorage（界面与
- * 启动全量同步源）、real_market_25.json（zeus 实际读取的策略注册表）。
+ * 启动全量同步源）、real_market_25.json（fusion 实际读取的策略注册表）。
  * 注意：pos 模式回测范围为全部 weight>0 策略的融合组合，回测某个
  * variant 前应将其余策略组权重设为 0，或在 /mcp/backtest/run 传
  * only_backtest_name=true 临时隔离（结束自动恢复）。
@@ -1390,7 +1389,7 @@ mcpRouter.put("/backtest/config", async (c: Context) => {
 	for (const [key, value] of Object.entries(body)) {
 		if (key in allowedKeys) {
 			// 板块过滤字段与 UI 写入口径保持一致：落盘为布尔值。
-			// zeus（Python）按真值判断，非空字符串 "0" 为真，会被误当作「过滤」。
+			// fusion（Python）按真值判断，非空字符串 "0" 为真，会被误当作「过滤」。
 			// T-20260905-06：数字 1 同样按真值接受（JSON 数字被静默存 false 的坑）；
 			// 数字 0 / "0" / false 仍落盘 false。
 			const stored = key.startsWith("filter_")
@@ -1432,7 +1431,7 @@ function parseMetricNumber(value: string | undefined): number | undefined {
 	return match ? Number.parseFloat(match[0]) : undefined
 }
 
-/** 读取内核版本标识（如 zeus_bin_2.2.0；无对应 yml 时返回 undefined） */
+/** 读取内核版本标识（如 fusion_bin_2.2.0；无对应 yml 时返回 undefined） */
 async function readKernelVersionTag(
 	kernel: string,
 ): Promise<string | undefined> {

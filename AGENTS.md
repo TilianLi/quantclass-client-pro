@@ -4,7 +4,7 @@
 
 ## 1. 项目概览
 
-`QuantclassClient`（量化小讲堂客户端）是一款面向量化交易的桌面端 Electron 应用，当前版本 `4.1.1`。它封装了股票数据下载、策略管理、回测、实时数据、实盘交易等能力，并通过 MCP（Model Context Protocol）向外部 AI 客户端暴露本地 API。
+`QuantclassClient`（量化小讲堂客户端）是一款面向量化交易的桌面端 Electron 应用，当前版本 `4.2.1`。4.2.x 起选股内核统一为 **Fusion**（替代原 Aqua 选股内核与 Zeus 高级选股内核，`KernalType = "fuel" | "fusion" | "rocket" | "scm"`，回测与实盘选股均跑 fusion，scm 为 config 大师常驻 FastAPI 服务）。它封装了股票数据下载、策略管理、回测、实时数据、实盘交易等能力，并通过 MCP（Model Context Protocol）向外部 AI 客户端暴露本地 API。
 
 - **产品名称**：QuantclassClient
 - **技术主线**：Electron + React + TypeScript + Vite
@@ -212,7 +212,7 @@ pnpm verify:mcp-tools         # 校验 MCP tool 注册（scripts/verify-mcp-tool
   - `get_sell_signals`：卖出信号列表
   - `get_stock_timing_plans`：个股择时买入/卖出计划
   - `get_account_info`：账户信息
-  - `get_trading_info`：Aqua 交易信息
+  - `get_trading_info`：Fusion 交易信息
 
 - **回测工具（10 个）**：
   - `get_backtest_config`：回测配置

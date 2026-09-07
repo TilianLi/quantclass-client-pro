@@ -193,9 +193,9 @@ describe("research-run", () => {
 			variantId: "v1",
 			hypothesis: "h",
 			verdict: "completed",
-			kernelVersion: "zeus_bin_2.2.0",
+			kernelVersion: "fusion_bin_2.2.0",
 		})
-		assert.strictEqual(entry.kernelVersion, "zeus_bin_2.2.0")
+		assert.strictEqual(entry.kernelVersion, "fusion_bin_2.2.0")
 	})
 
 	it("creates a research run with validation window", () => {

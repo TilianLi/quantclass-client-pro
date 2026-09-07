@@ -202,7 +202,7 @@ export const process_manager = new ProcessManage()
 export interface BacktestTask {
 	taskId: string
 	pid: number
-	kernel: "aqua" | "zeus"
+	kernel: "fusion"
 	action: string
 	status: "running" | "success" | "error"
 	exitCode: number | null
@@ -218,7 +218,7 @@ class BacktestTaskManager {
 
 	createTask(
 		pid: number,
-		kernel: "aqua" | "zeus",
+		kernel: "fusion",
 		action: string,
 	): BacktestTask {
 		const taskId = `${kernel}_${pid}`
@@ -281,7 +281,7 @@ export const backtest_task_manager = new BacktestTaskManager()
 export const execBinDetached = async (
 	args: string[],
 	action: string,
-	kernel: "aqua" | "zeus",
+	kernel: "fusion",
 	extraEnv?: string,
 ): Promise<BacktestTask> => {
 	try {
@@ -358,13 +358,13 @@ export const execBinDetached = async (
 					mainWindow.webContents.send(
 						"send-python-output",
 						line,
-						kernel === "aqua" ? "realMarket" : "realMarket",
+						"realMarket",
 					)
 					if (terminalWindow) {
 						terminalWindow.webContents.send(
 							"send-python-output",
 							line,
-							kernel === "aqua" ? "realMarket" : "realMarket",
+							"realMarket",
 						)
 					}
 				}

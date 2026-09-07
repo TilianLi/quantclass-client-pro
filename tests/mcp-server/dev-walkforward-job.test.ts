@@ -32,7 +32,7 @@ mock.module("../../src/mcp-server/client.ts", {
 			if (path.startsWith("/mcp/backtest/task")) {
 				return {
 					code: 0,
-					data: { status: "success", kernelVersion: "zeus_test_1.0" },
+					data: { status: "success", kernelVersion: "fusion_test_1.0" },
 				}
 			}
 			if (path === "/mcp/backtest/performance") {
@@ -52,7 +52,7 @@ mock.module("../../src/mcp-server/client.ts", {
 		post: async (path: string) => {
 			calls.post.push(path)
 			if (path === "/mcp/backtest/run-async") {
-				return { code: 0, data: { taskId: "zeus_t1", kernel: "zeus" } }
+				return { code: 0, data: { taskId: "fusion_t1", kernel: "fusion" } }
 			}
 			throw new Error(`unexpected POST ${path}`)
 		},
@@ -187,7 +187,7 @@ describe("dev-walkforward-job", () => {
 		assert.strictEqual(entry.windows?.length, 2)
 		assert.ok(entry.worstWindow)
 		assert.strictEqual(entry.metrics?.annual_return_pct, 12)
-		assert.strictEqual(entry.kernelVersion, "zeus_test_1.0")
+		assert.strictEqual(entry.kernelVersion, "fusion_test_1.0")
 
 		// PUT 序列：窗口1 切窗 → 窗口2 切窗 → 恢复原配置（filter 归一为 boolean）
 		assert.strictEqual(calls.put.length, 3)

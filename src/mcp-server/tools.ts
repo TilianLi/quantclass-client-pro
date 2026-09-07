@@ -385,7 +385,7 @@ export function registerTools(server: McpServer): void {
 
 	server.tool(
 		"get_trading_info",
-		"查询 Aqua 交易信息，包含交易内核的运行状态和交易记录",
+		"查询 Fusion 交易信息，包含交易内核的运行状态和交易记录",
 		{},
 		async () => {
 			try {
@@ -437,13 +437,13 @@ export function registerTools(server: McpServer): void {
 
 	server.tool(
 		"run_backtest",
-		"执行策略回测。根据当前策略库类型自动选择内核（选股→aqua，仓位管理→zeus）。回测是长耗时操作（可能几分钟到几十分钟），会阻塞直到回测完成。回测期间不能同时运行实盘。建议在非交易时段使用。仓位管理库(zeus)默认会融合回测全部 weight>0 的策略组；传 only_backtest_name=true 可临时将其他组权重置 0、只回测当前 backtest_name 策略组，结束后自动恢复原权重。成功响应包含 backtestName、kernelVersion、durationMs、resultPath；未产出结果（内核失败）返回错误。",
+		"执行策略回测。4.2.1 起选股内核统一为 Fusion（替代 Aqua/Zeus），选股库与仓位管理库均跑 fusion 内核。回测是长耗时操作（可能几分钟到几十分钟），会阻塞直到回测完成。回测期间不能同时运行实盘。建议在非交易时段使用。仓位管理库(pos)默认会融合回测全部 weight>0 的策略组；传 only_backtest_name=true 可临时将其他组权重置 0、只回测当前 backtest_name 策略组，结束后自动恢复原权重。成功响应包含 backtestName、kernelVersion、durationMs、resultPath；未产出结果（内核失败）返回错误。",
 		{
 			only_backtest_name: z
 				.boolean()
 				.optional()
 				.describe(
-					"仅回测当前 backtest_name 策略组：回测前临时将库内其他策略组权重置 0（三层同步），结束后无论成败自动恢复原权重。仅仓位管理库(zeus)有效，默认 false",
+					"仅回测当前 backtest_name 策略组：回测前临时将库内其他策略组权重置 0（三层同步），结束后无论成败自动恢复原权重。仅仓位管理库(pos)有效，默认 false",
 				),
 		},
 		async ({ only_backtest_name }) => {
@@ -511,7 +511,7 @@ export function registerTools(server: McpServer): void {
 		"get_backtest_task",
 		"查询异步回测任务状态（run_backtest_async 返回的 taskId）。返回 status(running/success/error)、exitCode、stdout/stderr 尾部日志与 kernelVersion。status=success 时校验本次回测产物（策略评价.csv 存在且为本次运行所写），未产出则 status 降级为 error 并附 artifactError。",
 		{
-			taskId: z.string().describe("任务 ID（形如 zeus_12345）"),
+			taskId: z.string().describe("任务 ID（形如 fusion_12345）"),
 		},
 		async ({ taskId }) => {
 			try {

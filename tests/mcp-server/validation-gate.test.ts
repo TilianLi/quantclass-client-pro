@@ -115,12 +115,12 @@ describe("validation-gate", () => {
 	it("saves, reads and clears validation state", () => {
 		assert.strictEqual(readValidationState("run-s"), null)
 		saveValidationState("run-s", {
-			taskId: "zeus_123",
+			taskId: "fusion_123",
 			startedAt: "2026-07-25T04:40:00+08:00",
 			priorConfig: { startDate: "2023-01-01", endDate: "2024-12-31" },
 		})
 		const state = readValidationState("run-s")
-		assert.strictEqual(state?.taskId, "zeus_123")
+		assert.strictEqual(state?.taskId, "fusion_123")
 		assert.strictEqual(state?.priorConfig.startDate, "2023-01-01")
 		clearValidationState("run-s")
 		assert.strictEqual(readValidationState("run-s"), null)
